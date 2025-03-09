@@ -84,12 +84,7 @@ def initialize_model(attn_type):
         'use_mla': use_mla,
         'use_mqa': use_mqa,
         'use_rope': use_rope,
-        'cache_compress': cache_compress,
-        'dropout': 0.0,      # Disable dropout for deterministic behavior
-        'bias': True,        # Enable bias terms for better expressivity
-        'qk_norm': True,     # Enable query-key normalization
-        'qk_scale': None,    # Let the model compute the scale
-        'rotary_dim': 128    # Fixed rotary dimension for all RoPE variants
+        'cache_compress': cache_compress
     }
     
     print(f"\nModel configuration:")
