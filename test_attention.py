@@ -120,8 +120,6 @@ def test_kv_cache(model, seq_len=16, d_model=64):
     kv_cache = None
     with torch.no_grad():
         for i in range(seq_len):
-            # For MLA variants, kv_cache will be compressed KV values
-            # For other variants, kv_cache will be expanded K,V heads
             output, kv_cache = model(x[:, i:i+1, :], kv_cache=kv_cache, past_length=i)
             cached_outputs.append(output)
     
@@ -145,34 +143,46 @@ def test_kv_cache(model, seq_len=16, d_model=64):
             print(f"Expected shape: {expected_shape}")
             assert kv_cache.shape == expected_shape, f"KV cache shape mismatch: {kv_cache.shape} != {expected_shape}"
     
+    print(f"{type(model).__name__} KV cache max difference: {max_diff:.6f}")
+    print(f"KV cache {'consistent' if max_diff < 1e-5 else 'inconsistent'}")
+    
     return max_diff
 
 def test_position_sensitivity(model, seq_len=16, d_model=64):
     """Test if RoPE models are position-sensitive while non-RoPE are not."""
     # Create two different sequences with the same content but different positions
     x1 = torch.randn(1, seq_len, d_model)
-    x2 = torch.randn(1, seq_len, d_model)
+    x2 = torch.clone(x1)  # Use clone to ensure identical content
     
-    # Make the middle tokens identical in both sequences
-    mid_start = seq_len // 4
-    mid_end = 3 * seq_len // 4
-    x2[:, mid_start:mid_end] = x1[:, mid_start:mid_end]
+    # Shift the sequence by 2 positions
+    shift = 2
+    x2 = torch.roll(x2, shifts=shift, dims=1)
     
     # Process both sequences
     with torch.no_grad():
         output1, _ = model(x1)
         output2, _ = model(x2)
     
-    # Compare outputs for the identical middle section
+    # Compare outputs for the non-shifted portion
     # RoPE models should produce different outputs even for identical tokens
     # due to position-dependent encoding
-    mid_output_diff = (output1[:, mid_start:mid_end] - output2[:, mid_start:mid_end]).abs().max().item()
+    valid_range = slice(shift, -shift) if shift > 0 else slice(None)
+    mid_output_diff = (output1[:, valid_range] - output2[:, valid_range]).abs().mean().item()
     
     # Higher threshold for RoPE variants as they should show position sensitivity
     is_rope = isinstance(model, (Rope_MHA, Rope_MQA, MLA))
-    threshold = 0.05 if is_rope else 0.01
+    threshold = 0.01  # Lower threshold since we're using mean difference
     
-    return mid_output_diff > threshold
+    is_sensitive = mid_output_diff > threshold
+    expected_sensitive = is_rope
+    
+    print(f"\n{type(model).__name__}:")
+    print(f"Position sensitivity score: {mid_output_diff:.6f}")
+    print(f"Position sensitive: {is_sensitive}")
+    print(f"Expected to be position sensitive: {expected_sensitive}")
+    print(f"Matches expectations: {is_sensitive == expected_sensitive}")
+    
+    return is_sensitive
 
 def plot_attention_patterns(patterns, title):
     """Plot attention patterns for visualization."""
