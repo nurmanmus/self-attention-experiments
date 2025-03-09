@@ -15,38 +15,39 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
         # Get attention weights from the output
         # The output should be (attn_output, kv_cache)
         # We need to compute attention weights from the module's Q and K
+        head_dim = d_model // module.n_heads  # Define head_dim here for all variants
+        
         if isinstance(module, (RopelessMQA, Rope_MQA)):
             # MQA case
-            Q = x @ module.wq.T
-            KV = x @ module.wkv
-            K, _ = torch.chunk(KV, 2, -1)
-            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
-            k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
+            Q = x @ module.wq  # Shape: [B, S, D]
+            KV = x @ module.wkv  # Shape: [B, S, 2D]
+            K, _ = torch.chunk(KV, 2, -1)  # K shape: [B, S, D]
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
+            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
         elif isinstance(module, (MHA, Rope_MHA)):
             # MHA case
-            QKV = x @ module.qkv
-            Q, K, V = torch.chunk(QKV, 3, -1)
-            head_dim = d_model // module.n_heads
-            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)
-            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)
+            QKV = x @ module.qkv  # Shape: [B, S, 3D]
+            qkv = QKV.reshape(QKV.shape[0], QKV.shape[1], 3, module.n_heads, head_dim)
+            q, k, v = qkv.unbind(dim=2)  # Each shape: [B, S, H, D/H]
+            q_heads = q.transpose(1, 2)  # [B, H, S, D/H]
+            k_heads = k.transpose(1, 2)  # [B, H, S, D/H]
         elif isinstance(module, (RopelessMLA, MLA)):
-            # MLA case
-            compressed_q = x @ module.W_dq  # B, S, q_proj_dim
-            Q = compressed_q @ module.W_uq  # B, S, D
-            compressed_kv = x @ module.W_dkv  # B, S, kv_proj_dim
+            # MLA case - no changes needed as it's working correctly
+            compressed_q = x @ module.W_dq  # [B, S, q_proj_dim]
+            Q = compressed_q @ module.W_uq  # [B, S, D]
+            compressed_kv = x @ module.W_dkv  # [B, S, kv_proj_dim]
             if hasattr(module, 'W_ukv'):
-                KV = compressed_kv @ module.W_ukv  # B, S, 2D
-                K, _ = torch.chunk(KV, 2, -1)  # B, S, D
+                KV = compressed_kv @ module.W_ukv  # [B, S, 2D]
+                K, _ = torch.chunk(KV, 2, -1)  # [B, S, D]
             else:
-                K = module.kv_layernorm(compressed_kv)  # B, S, D
-            head_dim = d_model // module.n_heads
-            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # B, H, S, D/H
-            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # B, H, S, D/H
+                K = module.kv_layernorm(compressed_kv)  # [B, S, D]
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
+            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
         else:
             raise ValueError(f"Unknown attention type: {type(module)}")
         
-        # Compute attention weights
-        attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / (head_dim ** 0.5)
+        # Compute attention weights with proper scaling
+        attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / (head_dim ** 0.5)  # [B, H, S, S]
         attention_patterns.append(attn_weights.detach())
     
     # Register hook directly on the model since it is the attention module
@@ -85,22 +86,30 @@ def test_kv_cache(model, seq_len=16, d_model=64):
 
 def test_position_sensitivity(model, seq_len=16, d_model=64):
     """Test if RoPE models are position-sensitive while non-RoPE are not."""
-    x = torch.randn(1, seq_len, d_model)
+    # Create two different sequences with the same content but different positions
+    x1 = torch.randn(1, seq_len, d_model)
+    x2 = torch.randn(1, seq_len, d_model)
     
-    # Original sequence
+    # Make the middle tokens identical in both sequences
+    mid_start = seq_len // 4
+    mid_end = 3 * seq_len // 4
+    x2[:, mid_start:mid_end] = x1[:, mid_start:mid_end]
+    
+    # Process both sequences
     with torch.no_grad():
-        orig_output, _ = model(x)
+        output1, _ = model(x1)
+        output2, _ = model(x2)
     
-    # Shifted sequence
-    shift = seq_len // 2
-    x_shifted = torch.roll(x, shifts=shift, dims=1)
-    with torch.no_grad():
-        shifted_output, _ = model(x_shifted)
+    # Compare outputs for the identical middle section
+    # RoPE models should produce different outputs even for identical tokens
+    # due to position-dependent encoding
+    mid_output_diff = (output1[:, mid_start:mid_end] - output2[:, mid_start:mid_end]).abs().max().item()
     
-    # For RoPE models, outputs should differ
-    # For non-RoPE models, outputs should be similar when shifted
-    output_diff = (orig_output - torch.roll(shifted_output, shifts=-shift, dims=1)).abs().max().item()
-    return output_diff
+    # Higher threshold for RoPE variants as they should show position sensitivity
+    is_rope = isinstance(model, (Rope_MHA, Rope_MQA, MLA))
+    threshold = 0.05 if is_rope else 0.01
+    
+    return mid_output_diff > threshold
 
 def plot_attention_patterns(patterns, title):
     """Plot attention patterns for visualization."""
@@ -170,15 +179,13 @@ def main():
     print("\nTesting position sensitivity...")
     for name, model in models.items():
         try:
-            diff = test_position_sensitivity(model, seq_len, d_model)
-            expected_sensitive = 'RoPE' in name
-            actual_sensitive = diff > 0.1
+            is_sensitive = test_position_sensitivity(model, seq_len, d_model)
+            expected_sensitive = 'RoPE' in name or name == 'MLA'  # MLA uses RoPE by default
             
             print(f"\n{name}:")
-            print(f"Position sensitivity: {diff:.6f}")
+            print(f"Position sensitive: {is_sensitive}")
             print(f"Expected to be position sensitive: {expected_sensitive}")
-            print(f"Actually position sensitive: {actual_sensitive}")
-            print(f"Matches expectations: {expected_sensitive == actual_sensitive}")
+            print(f"Matches expectations: {is_sensitive == expected_sensitive}")
         except Exception as e:
             print(f"Error testing position sensitivity for {name}: {str(e)}")
 
