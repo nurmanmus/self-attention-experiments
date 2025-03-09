@@ -1,7 +1,7 @@
 import torch
 import math
 
-from .utils import apply_rope_x
+from .utils import apply_rope, apply_rope_x
 
 class RopelessMQA(torch.nn.Module):
 
@@ -9,9 +9,11 @@ class RopelessMQA(torch.nn.Module):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
-        self.wq = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
-        self.wkv = torch.nn.Parameter(0.01*torch.randn((d_model, 2 * (d_model//n_heads))))
-        self.wo = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        # Initialize with consistent scale
+        std = 0.02
+        self.wq = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
+        self.wkv = torch.nn.Parameter(std*torch.randn((d_model, 2 * (d_model//n_heads))))
+        self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         # queries, keys, and values
@@ -67,9 +69,11 @@ class Rope_MQA(torch.nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dh = d_model // n_heads        
-        self.wq = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
-        self.wkv = torch.nn.Parameter(0.01*torch.randn((d_model, 2 * self.dh)))
-        self.wo = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        # Initialize with consistent scale
+        std = 0.02
+        self.wq = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
+        self.wkv = torch.nn.Parameter(std*torch.randn((d_model, 2 * self.dh)))
+        self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
         # RoPE
         self.max_seq_len = max_len
@@ -111,13 +115,9 @@ class Rope_MQA(torch.nn.Module):
         S_full = k_heads.size(2)        
 
         ## Apply RoPE        
-        cos_q = self.cos_cached[:, :, past_length:past_length+S, :self.dh//2].repeat(1, 1, 1, 2)
-        sin_q = self.sin_cached[:, :, past_length:past_length+S, :self.dh//2].repeat(1, 1, 1, 2)
-        q_heads = apply_rope_x(q_heads, cos_q, sin_q)
-        
-        cos_k = self.cos_cached[:, :, :S_full, :self.dh//2].repeat(1, 1, 1, 2)
-        sin_k = self.sin_cached[:, :, :S_full, :self.dh//2].repeat(1, 1, 1, 2)
-        k_heads = apply_rope_x(k_heads, cos_k, sin_k)
+        cos = self.cos_cached[:, :, past_length:past_length+S, :self.dh//2].repeat(1, 1, 1, 2)
+        sin = self.sin_cached[:, :, past_length:past_length+S, :self.dh//2].repeat(1, 1, 1, 2)
+        q_heads, k_heads = apply_rope(q_heads, k_heads, cos, sin)
 
         # make attention mask
         mask = torch.ones((S,S_full), device=x.device)

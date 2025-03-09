@@ -9,8 +9,10 @@ class MHA(torch.nn.Module):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
-        self.qkv = torch.nn.Parameter(0.01*torch.randn((3*d_model, d_model)))
-        self.wo = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        # Initialize with consistent scale
+        std = 0.02
+        self.qkv = torch.nn.Parameter(std*torch.randn((3*d_model, d_model)))
+        self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         # queries, keys, and values
@@ -63,8 +65,10 @@ class Rope_MHA(torch.nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dh = d_model // n_heads
-        self.qkv = torch.nn.Parameter(0.01*torch.randn((3*d_model, d_model)))
-        self.wo = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        # Initialize with consistent scale
+        std = 0.02
+        self.qkv = torch.nn.Parameter(std*torch.randn((3*d_model, d_model)))
+        self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
         # RoPE
         self.max_seq_len = max_len
