@@ -30,7 +30,8 @@ def initialize_model(attn_type):
         vocab_size=50257,  # GPT-2 vocab size
         max_seq_len=1024,
         use_mla=attn_type == 'mla',
-        use_mqa=attn_type == 'mqa'
+        use_mqa=attn_type == 'mqa',
+        return_attention=True  # Explicitly request attention weights
     )
     
     # Try to load pre-trained weights if available
@@ -179,24 +180,40 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
         x = x.view(batch_size, -1)
     
     with torch.no_grad():
-        # Get attention weights from the model's forward pass
+        # Get model outputs with attention weights
         outputs = model(x)
-        # Model returns (logits, kv_cache)
-        if isinstance(outputs, tuple) and len(outputs) > 1:
-            logits, kv_cache = outputs
-            # Extract attention weights from kv_cache
-            attention_weights = []
-            for layer_cache in kv_cache:
-                if isinstance(layer_cache, tuple):
-                    # Assuming layer_cache is (key, value) or (key, value, attention)
-                    if len(layer_cache) > 2:
-                        attention_weights.append(layer_cache[2])  # Get attention weights
-            if not attention_weights:
-                print("Warning: No attention weights found in model outputs")
-                return None
+        
+        # Extract attention weights based on model output format
+        if isinstance(outputs, dict) and 'attention_weights' in outputs:
+            # If model returns a dictionary with attention weights
+            attention_weights = outputs['attention_weights']
+        elif isinstance(outputs, tuple) and len(outputs) > 1:
+            # If model returns (logits, attention_weights) or (logits, kv_cache)
+            if isinstance(outputs[1], list) and all(isinstance(layer, torch.Tensor) for layer in outputs[1]):
+                attention_weights = outputs[1]
+            elif isinstance(outputs[1], tuple) and len(outputs[1]) > 0:
+                # Try to extract attention from kv_cache
+                attention_weights = []
+                for layer_cache in outputs[1]:
+                    if isinstance(layer_cache, tuple) and len(layer_cache) > 2:
+                        attention_weights.append(layer_cache[2])
         else:
-            print("Warning: Model did not return attention weights, skipping attention analysis")
+            print("Warning: Could not extract attention weights from model outputs")
+            print(f"Model output type: {type(outputs)}")
+            if isinstance(outputs, tuple):
+                print(f"Output tuple length: {len(outputs)}")
+                for i, item in enumerate(outputs):
+                    print(f"Output[{i}] type: {type(item)}")
             return None
+        
+        if not attention_weights:
+            print("Warning: No attention weights found in model outputs")
+            return None
+            
+        # Verify attention weights format
+        print(f"Number of attention layers: {len(attention_weights)}")
+        for i, layer_weights in enumerate(attention_weights):
+            print(f"Layer {i} attention weights shape: {layer_weights.shape}")
     
     # Create directory for figures if it doesn't exist
     os.makedirs("figures", exist_ok=True)
@@ -214,9 +231,12 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
                 print(f"Warning: Unexpected attention weight shape: {layer_attention.shape}")
                 continue
             
+            # Average across heads for visualization
+            avg_attention = layer_weights.mean(dim=0).numpy()
+            
             # Create heatmap
             plt.figure(figsize=(12, 8))
-            sns.heatmap(layer_weights[0].numpy(), cmap='viridis')
+            sns.heatmap(avg_attention, cmap='viridis')
             plt.title(f'Attention Pattern - {source}\nLayer {layer_idx + 1}')
             plt.xlabel('Key Position')
             plt.ylabel('Query Position')
