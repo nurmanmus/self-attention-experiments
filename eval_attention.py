@@ -7,13 +7,13 @@ from torch.amp import autocast
 import psutil
 import os
 
-def measure_memory_usage(model, device, input_size=(1, 512)):
+def measure_memory_usage(model, device, vocab_size, input_size=(1, 512)):
     """Measure peak memory usage of the model during forward and backward pass"""
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     
     # Generate random token indices as input
-    x = torch.randint(0, model.vocab_size, input_size).to(device)
+    x = torch.randint(0, vocab_size, input_size).to(device)
     
     # Forward pass
     with autocast('cuda'):
@@ -32,9 +32,9 @@ def measure_memory_usage(model, device, input_size=(1, 512)):
         'total_memory_mb': (forward_mem + backward_mem) / 1024**2
     }
 
-def measure_inference_speed(model, device, input_size=(1, 512), n_runs=100):
+def measure_inference_speed(model, device, vocab_size, input_size=(1, 512), n_runs=100):
     """Measure average inference time"""
-    x = torch.randint(0, model.vocab_size, input_size).to(device)
+    x = torch.randint(0, vocab_size, input_size).to(device)
     times = []
     
     # Warmup
@@ -54,9 +54,9 @@ def measure_inference_speed(model, device, input_size=(1, 512), n_runs=100):
         'std_time_ms': np.std(times) * 1000
     }
 
-def analyze_attention_patterns(model, device, input_size=(1, 512)):
+def analyze_attention_patterns(model, device, vocab_size, input_size=(1, 512)):
     """Analyze attention patterns for each mechanism"""
-    x = torch.randint(0, model.vocab_size, input_size).to(device)
+    x = torch.randint(0, vocab_size, input_size).to(device)
     
     # Get attention weights
     model.eval()
@@ -94,7 +94,7 @@ def plot_comparison(results, metric, title):
     plt.savefig(f'./figures/{metric.lower().replace(" ", "_")}_comparison.png')
     plt.close()
 
-def evaluate_attention_mechanisms(sequence_length=512, d_model=512):
+def evaluate_attention_mechanisms(sequence_length=512, d_model=512, vocab_size=10000):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -115,7 +115,7 @@ def evaluate_attention_mechanisms(sequence_length=512, d_model=512):
             d_model=d_model,
             n_heads=16,
             layers=8,
-            vocab_size=10000,
+            vocab_size=vocab_size,
             max_seq_len=1024,
             **config
         ).to(device)
@@ -135,18 +135,18 @@ def evaluate_attention_mechanisms(sequence_length=512, d_model=512):
         # 1. Memory Usage
         print("Measuring memory usage...")
         results[name].update(
-            measure_memory_usage(model, device, input_size=(1, sequence_length))
+            measure_memory_usage(model, device, vocab_size, input_size=(1, sequence_length))
         )
         
         # 2. Inference Speed
         print("Measuring inference speed...")
         results[name].update(
-            measure_inference_speed(model, device, input_size=(1, sequence_length))
+            measure_inference_speed(model, device, vocab_size, input_size=(1, sequence_length))
         )
         
         # 3. Attention Patterns
         print("Analyzing attention patterns...")
-        attn_stats = analyze_attention_patterns(model, device, input_size=(1, sequence_length))
+        attn_stats = analyze_attention_patterns(model, device, vocab_size, input_size=(1, sequence_length))
         if attn_stats:
             results[name].update(attn_stats)
         
