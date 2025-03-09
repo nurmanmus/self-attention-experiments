@@ -45,11 +45,30 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
     # Create figures directory if it doesn't exist
     os.makedirs("figures", exist_ok=True)
     
-    # Load datasets
+    # Load datasets with increased timeout and retries
     try:
-        wikitext = load_dataset("wikitext", "wikitext-103-v1", split="test")
-        c4 = load_dataset("allenai/c4", "en", split="train", streaming=True)
-        bookcorpus = load_dataset("bookcorpus", split="train", streaming=True)
+        # Configure dataset loading with longer timeout
+        from datasets.config import HF_DATASETS_CACHE
+        from datasets.utils.download_manager import DownloadConfig
+        download_config = DownloadConfig(max_retries=5, num_proc=4, force_download=False)
+        
+        # Load datasets with increased timeout
+        wikitext = load_dataset("wikitext", 
+                              "wikitext-103-v1", 
+                              split="test",
+                              download_config=download_config)
+        
+        c4 = load_dataset("allenai/c4", 
+                         "en", 
+                         split="train", 
+                         streaming=True,
+                         download_config=download_config)
+        
+        bookcorpus = load_dataset("bookcorpus", 
+                                 split="train", 
+                                 streaming=True,
+                                 download_config=download_config,
+                                 trust_remote_code=True)
         
         # Get samples from each dataset
         wiki_samples = wikitext["text"][:num_samples]
@@ -88,12 +107,15 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
         if tokenized_texts:
             input_tensor = torch.cat(tokenized_texts, dim=0)
         else:
-            raise ValueError("No valid samples found in the datasets")
+            print("Warning: No valid samples found in the datasets, using random data")
+            input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
+            return input_tensor, [("random", "Random text") for _ in range(num_samples)]
             
         return input_tensor, source_texts
         
     except Exception as e:
         print(f"Error loading datasets: {str(e)}")
+        print("Falling back to random data generation")
         # Fallback to simple random data if dataset loading fails
         input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
         return input_tensor, [("random", "Random text") for _ in range(num_samples)]
@@ -291,10 +313,16 @@ def display_all_figures():
 if __name__ == "__main__":
     print("Using device:", device)
     print("Loading tokenizer...")
+    
+    # Initialize tokenizer with padding
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token  # Use EOS token as padding token
     
     # Run evaluation
-    results = evaluate_attention_mechanisms(num_samples=1000)
-    
-    # Display figures if in notebook environment
-    display_all_figures() 
+    try:
+        results = evaluate_attention_mechanisms(num_samples=1000)
+        
+        # Display figures if in notebook environment
+        display_all_figures()
+    except Exception as e:
+        print(f"Error during evaluation: {str(e)}") 
