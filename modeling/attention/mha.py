@@ -9,10 +9,8 @@ class MHA(torch.nn.Module):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
-        # Initialize with consistent scale
-        std = 0.02
-        self.qkv = torch.nn.Parameter(std*torch.randn((3*d_model, d_model)))
-        self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
+        self.qkv = torch.nn.Parameter(0.02*torch.randn((3*d_model, d_model)))
+        self.wo = torch.nn.Parameter(0.02*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         # queries, keys, and values
@@ -65,10 +63,8 @@ class Rope_MHA(torch.nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dh = d_model // n_heads
-        # Initialize with consistent scale
-        std = 0.02
-        self.qkv = torch.nn.Parameter(std*torch.randn((3*d_model, d_model)))
-        self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
+        self.qkv = torch.nn.Parameter(0.02*torch.randn((3*d_model, d_model)))
+        self.wo = torch.nn.Parameter(0.02*torch.randn((d_model, d_model)))
 
         # RoPE
         self.max_seq_len = max_len
@@ -142,10 +138,10 @@ class Decoupled_Rope_MHA(torch.nn.Module):
         self.qk_nope_dim = self.dh // 2
         self.qk_rope_dim = self.dh // 2
         
-        self.qkv = torch.nn.Parameter(0.01*torch.randn((2*d_model, d_model)))
-        self.wk = torch.nn.Parameter(0.01*torch.randn((self.n_heads * self.qk_nope_dim) + self.qk_rope_dim,
+        self.qkv = torch.nn.Parameter(0.02*torch.randn((2*d_model, d_model)))
+        self.wk = torch.nn.Parameter(0.02*torch.randn((self.n_heads * self.qk_nope_dim) + self.qk_rope_dim,
                                                       d_model))
-        self.wo = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        self.wo = torch.nn.Parameter(0.02*torch.randn((d_model, d_model)))
 
         # RoPE
         self.max_seq_len = max_len
