@@ -7,12 +7,12 @@ from torch.cuda.amp import autocast
 import psutil
 import os
 
-def measure_memory_usage(model, input_size=(1, 512, 512)):
+def measure_memory_usage(model, device, input_size=(1, 512, 512)):
     """Measure peak memory usage of the model during forward and backward pass"""
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     
-    x = torch.randn(*input_size).to(model.device)
+    x = torch.randn(*input_size).to(device)
     
     # Forward pass
     with autocast():
@@ -31,9 +31,9 @@ def measure_memory_usage(model, input_size=(1, 512, 512)):
         'total_memory_mb': (forward_mem + backward_mem) / 1024**2
     }
 
-def measure_inference_speed(model, input_size=(1, 512, 512), n_runs=100):
+def measure_inference_speed(model, device, input_size=(1, 512, 512), n_runs=100):
     """Measure average inference time"""
-    x = torch.randn(*input_size).to(model.device)
+    x = torch.randn(*input_size).to(device)
     times = []
     
     # Warmup
@@ -53,9 +53,9 @@ def measure_inference_speed(model, input_size=(1, 512, 512), n_runs=100):
         'std_time_ms': np.std(times) * 1000
     }
 
-def analyze_attention_patterns(model, input_size=(1, 512, 512)):
+def analyze_attention_patterns(model, device, input_size=(1, 512, 512)):
     """Analyze attention patterns for each mechanism"""
-    x = torch.randn(*input_size).to(model.device)
+    x = torch.randn(*input_size).to(device)
     
     # Get attention weights
     model.eval()
@@ -121,7 +121,7 @@ def evaluate_attention_mechanisms(sequence_length=512, d_model=512):
         
         # Load weights if available
         try:
-            model.load_state_dict(torch.load(f'./weights/{name.lower()}_model_weights.pt'))
+            model.load_state_dict(torch.load(f'./weights/{name.lower()}_model_weights.pt', weights_only=True))
             print(f"Loaded weights for {name}")
         except:
             print(f"No weights found for {name}, using random initialization")
@@ -134,18 +134,18 @@ def evaluate_attention_mechanisms(sequence_length=512, d_model=512):
         # 1. Memory Usage
         print("Measuring memory usage...")
         results[name].update(
-            measure_memory_usage(model, input_size=(1, sequence_length, d_model))
+            measure_memory_usage(model, device, input_size=(1, sequence_length, d_model))
         )
         
         # 2. Inference Speed
         print("Measuring inference speed...")
         results[name].update(
-            measure_inference_speed(model, input_size=(1, sequence_length, d_model))
+            measure_inference_speed(model, device, input_size=(1, sequence_length, d_model))
         )
         
         # 3. Attention Patterns
         print("Analyzing attention patterns...")
-        attn_stats = analyze_attention_patterns(model, input_size=(1, sequence_length, d_model))
+        attn_stats = analyze_attention_patterns(model, device, input_size=(1, sequence_length, d_model))
         if attn_stats:
             results[name].update(attn_stats)
         
