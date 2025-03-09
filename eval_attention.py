@@ -54,6 +54,8 @@ def initialize_model(attn_type):
     """Initialize model with specified attention type."""
     from modeling.gpt import GPTModel
     
+    print(f"\nInitializing {attn_type.upper()} model...")
+    
     # Set random seed for reproducibility
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -63,6 +65,12 @@ def initialize_model(attn_type):
     use_mqa = attn_type.startswith('mqa')
     use_rope = 'rope' in attn_type
     cache_compress = not ('uncompressed' in attn_type)
+    
+    print(f"Attention configuration:")
+    print(f"  use_mla: {use_mla}")
+    print(f"  use_mqa: {use_mqa}")
+    print(f"  use_rope: {use_rope}")
+    print(f"  cache_compress: {cache_compress}")
     
     # Fixed model dimensions for consistency
     model_config = {
@@ -77,23 +85,41 @@ def initialize_model(attn_type):
         'cache_compress': cache_compress
     }
     
-    print(f"\nInitializing {attn_type.upper()} model with config:")
+    print(f"\nModel configuration:")
     for k, v in model_config.items():
         print(f"  {k}: {v}")
     
-    model = GPTModel(**model_config)
-    
-    # Enable memory efficient features
-    model = enable_gradient_checkpointing(model)
-    
-    # Try to load pre-trained weights if available
     try:
-        model.load_state_dict(torch.load(f'weights/{attn_type}_model.pt', weights_only=True))
-        print(f"Loaded pre-trained weights for {attn_type}")
-    except:
-        print(f"No pre-trained weights found for {attn_type}, using random initialization")
-    
-    return model
+        print("\nCreating model instance...")
+        model = GPTModel(**model_config)
+        print("Model created successfully")
+        
+        print("\nModel structure:")
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        
+        # Enable memory efficient features
+        print("\nEnabling gradient checkpointing...")
+        model = enable_gradient_checkpointing(model)
+        print("Gradient checkpointing enabled")
+        
+        # Try to load pre-trained weights if available
+        try:
+            print("\nAttempting to load pre-trained weights...")
+            weights_path = f'weights/{attn_type}_model.pt'
+            print(f"Looking for weights at: {weights_path}")
+            model.load_state_dict(torch.load(weights_path, weights_only=True))
+            print(f"Successfully loaded pre-trained weights for {attn_type}")
+        except Exception as e:
+            print(f"No pre-trained weights found for {attn_type}: {str(e)}")
+            print("Using random initialization")
+        
+        return model
+    except Exception as e:
+        print(f"Error creating model: {str(e)}")
+        raise
 
 def clear_gpu_memory():
     """Clear GPU memory cache."""
@@ -383,32 +409,61 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
 
 def compute_model_outputs(model, input_ids, device):
     """Compute model outputs with proper error handling and device management."""
-    model.eval()
-    with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
-        try:
-            outputs = model(input_ids.to(device))
-            if isinstance(outputs, tuple):
-                logits = outputs[0]
-            else:
-                logits = outputs
-                
-            # Ensure logits are the right shape (batch_size, seq_len, vocab_size)
-            if len(logits.shape) != 3:
-                raise ValueError(f"Expected logits shape (batch_size, seq_len, vocab_size), got {logits.shape}")
-                
-            # Get predictions
-            probs = torch.softmax(logits, dim=-1)
-            predictions = torch.argmax(probs, dim=-1)
-            
-            # Move everything to CPU and maintain shapes
-            return {
-                'logits': logits.cpu(),  # Shape: (batch_size, seq_len, vocab_size)
-                'probs': probs.cpu(),    # Shape: (batch_size, seq_len, vocab_size)
-                'predictions': predictions.cpu()  # Shape: (batch_size, seq_len)
-            }
-        except Exception as e:
-            print(f"Error computing outputs: {str(e)}")
-            return None
+    try:
+        print(f"Input shape: {input_ids.shape}")
+        print(f"Device: {device}")
+        print(f"Model device: {next(model.parameters()).device}")
+        
+        model.eval()
+        input_ids = input_ids.to(device)
+        print(f"Inputs moved to device: {input_ids.device}")
+        
+        with torch.no_grad():
+            try:
+                # Use regular autocast instead of deprecated cuda.amp.autocast
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                    print("Computing model outputs...")
+                    outputs = model(input_ids)
+                    print(f"Raw output type: {type(outputs)}")
+                    
+                    if isinstance(outputs, tuple):
+                        print(f"Output tuple length: {len(outputs)}")
+                        logits = outputs[0]
+                    else:
+                        logits = outputs
+                    
+                    print(f"Logits shape: {logits.shape}")
+                    
+                    # Ensure logits are the right shape (batch_size, seq_len, vocab_size)
+                    if len(logits.shape) != 3:
+                        raise ValueError(f"Expected logits shape (batch_size, seq_len, vocab_size), got {logits.shape}")
+                    
+                    # Get predictions
+                    print("Computing probabilities...")
+                    probs = torch.softmax(logits, dim=-1)
+                    print(f"Probabilities shape: {probs.shape}")
+                    
+                    print("Computing predictions...")
+                    predictions = torch.argmax(probs, dim=-1)
+                    print(f"Predictions shape: {predictions.shape}")
+                    
+                    # Move everything to CPU and maintain shapes
+                    return {
+                        'logits': logits.cpu(),      # Shape: (batch_size, seq_len, vocab_size)
+                        'probs': probs.cpu(),        # Shape: (batch_size, seq_len, vocab_size)
+                        'predictions': predictions.cpu()  # Shape: (batch_size, seq_len)
+                    }
+            except RuntimeError as e:
+                print(f"Runtime error during model computation: {str(e)}")
+                print(f"CUDA memory allocated: {torch.cuda.memory_allocated()/1024/1024/1024:.2f} GB")
+                print(f"CUDA memory cached: {torch.cuda.memory_reserved()/1024/1024/1024:.2f} GB")
+                return None
+            except Exception as e:
+                print(f"Unexpected error during model computation: {str(e)}")
+                return None
+    except Exception as e:
+        print(f"Error in compute_model_outputs: {str(e)}")
+        return None
 
 def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-3):  # Increased tolerance
     """Compare outputs between two models and return detailed metrics."""
@@ -485,6 +540,9 @@ def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-3):  # Increa
 def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
     """Validate that different attention mechanisms produce consistent outputs."""
     print("\nValidating attention mechanism outputs...")
+    print(f"Test inputs shape: {test_inputs.shape}")
+    print(f"Device: {device}")
+    print(f"Using tolerance: {tolerance}")
     
     outputs = {}
     comparisons = {}
@@ -492,40 +550,66 @@ def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
     # Compute outputs for each model
     for name, model in models.items():
         try:
-            print(f"\nComputing outputs for {name.upper()}...")
+            print(f"\n{'='*50}")
+            print(f"Processing {name.upper()}...")
+            print(f"Model device: {next(model.parameters()).device}")
+            
             outputs[name] = compute_model_outputs(model, test_inputs, device)
+            
             if outputs[name] is None:
                 print(f"Warning: Failed to compute outputs for {name}")
+            else:
+                print(f"Successfully computed outputs for {name}")
+                print(f"Output shapes:")
+                print(f"  logits: {outputs[name]['logits'].shape}")
+                print(f"  probs: {outputs[name]['probs'].shape}")
+                print(f"  predictions: {outputs[name]['predictions'].shape}")
         except Exception as e:
             print(f"Error computing outputs for {name}: {str(e)}")
             outputs[name] = None
     
     # Compare outputs between all pairs of models
+    print("\nComparing model outputs...")
     model_names = list(models.keys())
     for i in range(len(model_names)):
         for j in range(i + 1, len(model_names)):
             name1, name2 = model_names[i], model_names[j]
             comparison_key = f"{name1}_vs_{name2}"
+            
+            print(f"\n{'-'*50}")
+            print(f"Comparing {name1.upper()} vs {name2.upper()}...")
+            
             try:
                 if outputs[name1] is None or outputs[name2] is None:
-                    print(f"\nSkipping comparison {name1} vs {name2} due to missing outputs")
+                    print(f"Skipping comparison due to missing outputs")
                     comparisons[comparison_key] = {'match': False, 'error': 'Missing outputs'}
                     continue
-                    
-                print(f"\nComparing {name1.upper()} vs {name2.upper()}...")
+                
+                print("Both outputs available, performing comparison...")
                 comparisons[comparison_key] = compare_outputs(
                     outputs[name1], outputs[name2], name1, name2, tolerance
                 )
+                
+                if 'error' in comparisons[comparison_key]:
+                    print(f"Comparison error: {comparisons[comparison_key]['error']}")
+                else:
+                    print(f"Comparison completed: Match = {comparisons[comparison_key]['match']}")
+                    
             except Exception as e:
-                print(f"Error comparing {name1} vs {name2}: {str(e)}")
+                print(f"Error during comparison: {str(e)}")
                 comparisons[comparison_key] = {'match': False, 'error': str(e)}
     
     # Overall validation result
+    print("\nAnalyzing validation results...")
     valid_comparisons = [comp for comp in comparisons.values() if 'error' not in comp]
+    
     if valid_comparisons:
         all_match = all(comp['match'] for comp in valid_comparisons)
         print("\nOverall Validation Result:")
+        print(f"Total comparisons: {len(comparisons)}")
+        print(f"Valid comparisons: {len(valid_comparisons)}")
         print(f"All mechanisms produce consistent outputs: {'Yes' if all_match else 'No'}")
+        
         if not all_match:
             print("\nInconsistent comparisons:")
             for key, comp in comparisons.items():
@@ -533,6 +617,10 @@ def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
                     print(f"- {key}")
     else:
         print("\nWarning: No valid comparisons were made")
+        print("Comparison errors:")
+        for key, comp in comparisons.items():
+            if 'error' in comp:
+                print(f"- {key}: {comp['error']}")
     
     return comparisons
 
