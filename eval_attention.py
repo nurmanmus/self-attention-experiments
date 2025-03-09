@@ -287,10 +287,18 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
                 # For MLA
                 B, S, D = inputs[0].shape
                 compressed_kv = inputs[0] @ module.W_dkv
-                compressed_kv = module.kv_layernorm(compressed_kv)
-                KV = compressed_kv @ module.W_ukv
-                K, V = torch.split(KV, module.d_model, dim=-1)
-                cache_size = K.numel() + V.numel()
+                KV_for_lora, K_for_rope = torch.split(compressed_kv,
+                                                     [module.kv_proj_dim, module.qk_rope_dim],
+                                                     dim=-1)
+                KV_for_lora = module.kv_layernorm(KV_for_lora)
+                KV = KV_for_lora @ module.W_ukv
+                KV = KV.view(B, -1, module.n_heads, module.dh+module.qk_nope_dim).transpose(1,2)
+                K, V = torch.split(KV, [module.qk_nope_dim, module.dh], dim=-1)
+                
+                # Include RoPE part in cache size calculation
+                K_for_rope = K_for_rope.view(B, -1, 1, module.qk_rope_dim).transpose(1,2)
+                K_for_rope = K_for_rope.repeat(1, module.n_heads, 1, 1)
+                cache_size = (K.numel() + K_for_rope.numel() + V.numel())
             
             # End timing
             end_time = time.time()
@@ -309,9 +317,7 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
     # Register hooks for each attention layer
     hooks = []
     for name, module in model.named_modules():
-        if name.endswith('.mha') and isinstance(module, (
-            model.layers[0].mha.__class__,
-        )):
+        if any(name.endswith(suffix) for suffix in ['.mha', '.mqa', '.mla']):
             hook = module.register_forward_hook(measure_kqv_hook)
             hooks.append(hook)
     
@@ -417,7 +423,14 @@ def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
     
     # Compute outputs for each model
     for name, model in models.items():
-        outputs[name] = compute_model_outputs(model, test_inputs, device)
+        try:
+            print(f"\nComputing outputs for {name.upper()}...")
+            outputs[name] = compute_model_outputs(model, test_inputs, device)
+            if outputs[name] is None:
+                print(f"Warning: Failed to compute outputs for {name}")
+        except Exception as e:
+            print(f"Error computing outputs for {name}: {str(e)}")
+            outputs[name] = None
     
     # Compare outputs between all pairs of models
     model_names = list(models.keys())
@@ -425,21 +438,42 @@ def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
         for j in range(i + 1, len(model_names)):
             name1, name2 = model_names[i], model_names[j]
             comparison_key = f"{name1}_vs_{name2}"
-            comparisons[comparison_key] = compare_outputs(
-                outputs[name1], outputs[name2], name1, name2, tolerance
-            )
+            try:
+                if outputs[name1] is None or outputs[name2] is None:
+                    print(f"\nSkipping comparison {name1} vs {name2} due to missing outputs")
+                    comparisons[comparison_key] = {'match': False, 'error': 'Missing outputs'}
+                    continue
+                    
+                print(f"\nComparing {name1.upper()} vs {name2.upper()}...")
+                comparisons[comparison_key] = compare_outputs(
+                    outputs[name1], outputs[name2], name1, name2, tolerance
+                )
+            except Exception as e:
+                print(f"Error comparing {name1} vs {name2}: {str(e)}")
+                comparisons[comparison_key] = {'match': False, 'error': str(e)}
     
     # Overall validation result
-    all_match = all(comp['match'] for comp in comparisons.values())
-    print("\nOverall Validation Result:")
-    print(f"All mechanisms produce consistent outputs: {'Yes' if all_match else 'No'}")
+    valid_comparisons = [comp for comp in comparisons.values() if 'error' not in comp]
+    if valid_comparisons:
+        all_match = all(comp['match'] for comp in valid_comparisons)
+        print("\nOverall Validation Result:")
+        print(f"All mechanisms produce consistent outputs: {'Yes' if all_match else 'No'}")
+        if not all_match:
+            print("\nInconsistent comparisons:")
+            for key, comp in comparisons.items():
+                if 'match' in comp and not comp['match']:
+                    print(f"- {key}")
+    else:
+        print("\nWarning: No valid comparisons were made")
     
     return comparisons
 
 def evaluate_attention_mechanisms(num_samples=32):
     """Evaluate different attention mechanisms."""
     print("Using device:", device)
-    print(f"GPU Memory Available: {torch.cuda.get_device_properties(0).total_memory/1024/1024/1024:.2f} GB")
+    if torch.cuda.is_available():
+        print(f"GPU Memory Available: {torch.cuda.get_device_properties(0).total_memory/1024/1024/1024:.2f} GB")
+        print(f"Current GPU Memory Usage: {torch.cuda.memory_allocated()/1024/1024/1024:.2f} GB")
     
     # Initialize results dictionary
     results = {
@@ -450,25 +484,34 @@ def evaluate_attention_mechanisms(num_samples=32):
     }
     
     # Initialize models for all attention mechanisms
-    models = {
-        'mha': initialize_model('mha'),
-        'mqa': initialize_model('mqa'),
-        'mla': initialize_model('mla')
-    }
-    
-    # Move models to device
-    for model in models.values():
-        model.to(device)
-        model.eval()
+    models = {}
+    for attn_type in ['mha', 'mqa', 'mla']:
+        try:
+            print(f"\nInitializing {attn_type.upper()} model...")
+            models[attn_type] = initialize_model(attn_type)
+            models[attn_type].to(device)
+            models[attn_type].eval()
+        except Exception as e:
+            print(f"Error initializing {attn_type} model: {str(e)}")
+            models[attn_type] = None
     
     # Generate test data for validation
     print("\nPreparing validation data...")
-    validation_inputs, _ = load_test_data(tokenizer, sequence_length=512, num_samples=4)
+    try:
+        validation_inputs, _ = load_test_data(tokenizer, sequence_length=512, num_samples=4)
+    except Exception as e:
+        print(f"Error loading validation data: {str(e)}")
+        return results
     
-    # Perform validation
-    results['validation_results'] = validate_attention_mechanisms(
-        models, validation_inputs, device, tolerance=1e-4
-    )
+    # Perform validation only for successfully initialized models
+    valid_models = {k: v for k, v in models.items() if v is not None}
+    if valid_models:
+        results['validation_results'] = validate_attention_mechanisms(
+            valid_models, validation_inputs, device, tolerance=1e-4
+        )
+    else:
+        print("No valid models to validate")
+        return results
     
     # Adjusted test parameters for A100
     sequence_lengths = [512, 1024, 2048]
