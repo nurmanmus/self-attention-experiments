@@ -19,32 +19,77 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
         
         if isinstance(module, (RopelessMQA, Rope_MQA)):
             # MQA case
-            Q = x @ module.wq  # Shape: [B, S, D]
-            KV = x @ module.wkv  # Shape: [B, S, 2D]
-            K, _ = torch.chunk(KV, 2, -1)  # K shape: [B, S, D]
+            Q = x @ module.wq.T  # Shape: [B, S, D]
+            KV = x @ module.wkv  # Shape: [B, S, 2*Dh]
+            K, _ = torch.chunk(KV, 2, -1)  # K shape: [B, S, Dh]
+            # Expand K for each head
+            K_expand = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1)  # [B, S, H, Dh]
+            # Reshape Q into heads
             q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
-            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
+            k_heads = K_expand.transpose(1, 2)  # [B, H, S, Dh]
         elif isinstance(module, (MHA, Rope_MHA)):
             # MHA case
-            QKV = x @ module.qkv  # Shape: [B, S, 3D]
-            qkv = QKV.reshape(QKV.shape[0], QKV.shape[1], 3, module.n_heads, head_dim)
-            q, k, v = qkv.unbind(dim=2)  # Each shape: [B, S, H, D/H]
-            q_heads = q.transpose(1, 2)  # [B, H, S, D/H]
-            k_heads = k.transpose(1, 2)  # [B, H, S, D/H]
-        elif isinstance(module, (RopelessMLA, MLA)):
-            # MLA case - no changes needed as it's working correctly
-            compressed_q = x @ module.W_dq  # [B, S, q_proj_dim]
-            Q = compressed_q @ module.W_uq  # [B, S, D]
-            compressed_kv = x @ module.W_dkv  # [B, S, kv_proj_dim]
-            if hasattr(module, 'W_ukv'):
-                KV = compressed_kv @ module.W_ukv  # [B, S, 2D]
-                K, _ = torch.chunk(KV, 2, -1)  # [B, S, D]
-            else:
-                K = module.kv_layernorm(compressed_kv)  # [B, S, D]
+            QKV = x @ module.qkv.T  # Shape: [B, S, 3D]
+            Q, K, V = torch.chunk(QKV, 3, -1)  # Each shape: [B, S, D]
+            # Split into heads
             q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
             k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
+        elif isinstance(module, RopelessMLA):
+            # RopelessMLA case
+            compressed_q = x @ module.W_dq  # [B, S, q_proj_dim]
+            compressed_q = module.q_layernorm(compressed_q)
+            Q = compressed_q @ module.W_uq  # [B, S, D]
+            
+            compressed_kv = x @ module.W_dkv  # [B, S, kv_proj_dim]
+            compressed_kv = module.kv_layernorm(compressed_kv)
+            KV = compressed_kv @ module.W_ukv  # [B, S, 2D]
+            K, _ = torch.split(KV, module.d_model, dim=-1)  # [B, S, D]
+            
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
+            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # [B, H, S, D/H]
+        elif isinstance(module, MLA):
+            # MLA case with decoupled RoPE
+            B, S, D = x.shape
+            
+            # Q projections with RoPE
+            compressed_q = x @ module.W_dq  # [B, S, q_proj_dim]
+            compressed_q = module.q_layernorm(compressed_q)
+            Q = compressed_q @ module.W_uq  # [B, S, D]
+            Q = Q.view(B, S, module.n_heads, module.dh).transpose(1, 2)  # [B, H, S, D/H]
+            Q, Q_for_rope = torch.split(Q, [module.qk_nope_dim, module.qk_rope_dim], dim=-1)
+            
+            # Apply RoPE to Q
+            cos_q = module.cos_cached[:, :, :S, :module.qk_rope_dim//2].repeat(1, 1, 1, 2)
+            sin_q = module.sin_cached[:, :, :S, :module.qk_rope_dim//2].repeat(1, 1, 1, 2)
+            Q_for_rope = apply_rope_x(Q_for_rope, cos_q, sin_q)
+            
+            # KV projections with RoPE
+            compressed_kv = x @ module.W_dkv  # [B, S, kv_proj_dim + rope_dim]
+            KV_for_lora, K_for_rope = torch.split(compressed_kv, [module.kv_proj_dim, module.qk_rope_dim], dim=-1)
+            KV_for_lora = module.kv_layernorm(KV_for_lora)
+            
+            # Project and split KV
+            KV = KV_for_lora @ module.W_ukv  # [B, S, D + H*nope_dim]
+            KV = KV.view(B, S, module.n_heads, module.dh + module.qk_nope_dim).transpose(1, 2)
+            K, V = torch.split(KV, [module.qk_nope_dim, module.dh], dim=-1)
+            
+            # Apply RoPE to K
+            K_for_rope = K_for_rope.view(B, S, 1, module.qk_rope_dim).transpose(1, 2)
+            cos_k = module.cos_cached[:, :, :S, :module.qk_rope_dim//2].repeat(1, 1, 1, 2)
+            sin_k = module.sin_cached[:, :, :S, :module.qk_rope_dim//2].repeat(1, 1, 1, 2)
+            K_for_rope = apply_rope_x(K_for_rope, cos_k, sin_k)
+            K_for_rope = K_for_rope.repeat(1, module.n_heads, 1, 1)
+            
+            # Combine Q and K heads
+            q_heads = torch.cat([Q, Q_for_rope], dim=-1)  # [B, H, S, D/H]
+            k_heads = torch.cat([K, K_for_rope], dim=-1)  # [B, H, S, D/H]
         else:
             raise ValueError(f"Unknown attention type: {type(module)}")
+        
+        # Print shapes for debugging
+        print(f"\nDebug shapes for {type(module).__name__}:")
+        print(f"q_heads shape: {q_heads.shape}")
+        print(f"k_heads shape: {k_heads.shape}")
         
         # Compute attention weights with proper scaling
         attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / (head_dim ** 0.5)  # [B, H, S, S]
@@ -75,6 +120,8 @@ def test_kv_cache(model, seq_len=16, d_model=64):
     kv_cache = None
     with torch.no_grad():
         for i in range(seq_len):
+            # For MLA variants, kv_cache will be compressed KV values
+            # For other variants, kv_cache will be expanded K,V heads
             output, kv_cache = model(x[:, i:i+1, :], kv_cache=kv_cache, past_length=i)
             cached_outputs.append(output)
     
@@ -82,6 +129,22 @@ def test_kv_cache(model, seq_len=16, d_model=64):
     
     # Compare outputs
     max_diff = (full_output - sequential_output).abs().max().item()
+    
+    # Print debug info for MLA variants
+    if isinstance(model, (RopelessMLA, MLA)) and kv_cache is not None:
+        print(f"\nDebug info for {type(model).__name__}:")
+        print(f"KV cache shape: {kv_cache.shape}")
+        if isinstance(model, MLA):
+            # For MLA, we expect compressed KV with RoPE dimensions
+            expected_shape = (1, seq_len, model.kv_proj_dim + model.qk_rope_dim)
+            print(f"Expected shape: {expected_shape}")
+            assert kv_cache.shape == expected_shape, f"KV cache shape mismatch: {kv_cache.shape} != {expected_shape}"
+        else:
+            # For RopelessMLA, we expect compressed KV
+            expected_shape = (1, seq_len, model.kv_proj_dim)
+            print(f"Expected shape: {expected_shape}")
+            assert kv_cache.shape == expected_shape, f"KV cache shape mismatch: {kv_cache.shape} != {expected_shape}"
+    
     return max_diff
 
 def test_position_sensitivity(model, seq_len=16, d_model=64):
