@@ -4,6 +4,15 @@ import math
 from .utils import apply_rope, apply_rope_x
 
 class MHA(torch.nn.Module):
+    """Multi-Head Attention implementation.
+    
+    Standard multi-head attention with parallel query, key, and value projections.
+    Uses scaled dot-product attention with optional KV caching.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+    """
 
     def __init__(self, d_model, n_heads):
         super().__init__()
@@ -57,6 +66,17 @@ class MHA(torch.nn.Module):
         return x, updated_kv_cache
 
 class Rope_MHA(torch.nn.Module):
+    """Multi-Head Attention with Rotary Position Embeddings (RoPE).
+    
+    Implements MHA with RoPE applied to queries and keys before attention computation.
+    Uses parallel QKV projections and supports KV caching.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        max_len (int, optional): Maximum sequence length for RoPE. Defaults to 1024.
+        rope_theta (float, optional): Base for RoPE frequency computation. Defaults to 10000.0.
+    """
 
     def __init__(self, d_model, n_heads, max_len=1024, rope_theta=10000.0):
         super().__init__()
@@ -128,6 +148,22 @@ class Rope_MHA(torch.nn.Module):
     
 
 class Decoupled_Rope_MHA(torch.nn.Module):
+    """Multi-Head Attention with Decoupled Rotary Position Embeddings.
+    
+    Implements MHA with decoupled RoPE, where only part of Q/K dimensions use RoPE.
+    This allows the model to capture both absolute and relative position information.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        max_len (int, optional): Maximum sequence length for RoPE. Defaults to 1024.
+        rope_theta (float, optional): Base for RoPE frequency computation. Defaults to 10000.0.
+    
+    Note:
+        The implementation splits Q/K into RoPE and non-RoPE parts:
+        - RoPE part: Processes relative positional information
+        - Non-RoPE part: Processes content and absolute position information
+    """
 
     def __init__(self, d_model, n_heads, max_len=1024, rope_theta=10000.0):
         super().__init__()

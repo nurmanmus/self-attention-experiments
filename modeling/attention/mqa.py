@@ -4,6 +4,19 @@ import math
 from .utils import apply_rope_x
 
 class RopelessMQA(torch.nn.Module):
+    """Multi-Query Attention implementation without RoPE.
+    
+    Implements MQA where keys and values are shared across heads while queries are head-specific.
+    This reduces memory and computation cost compared to standard MHA.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        
+    Note:
+        MQA typically reduces memory usage by a factor of n_heads compared to MHA,
+        while maintaining most of the model quality.
+    """
 
     def __init__(self, d_model, n_heads):
         super().__init__()
@@ -61,6 +74,20 @@ class RopelessMQA(torch.nn.Module):
 
 
 class Rope_MQA(torch.nn.Module):
+    """Multi-Query Attention with Rotary Position Embeddings (RoPE).
+    
+    Implements MQA with RoPE applied to queries and keys before attention computation.
+    Keys and values are shared across heads while queries are head-specific.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        max_len (int, optional): Maximum sequence length for RoPE. Defaults to 1024.
+        rope_theta (float, optional): Base for RoPE frequency computation. Defaults to 10000.0.
+        
+    Note:
+        Combines the efficiency of MQA with the position-awareness of RoPE.
+    """
 
     def __init__(self, d_model, n_heads, max_len=1024, rope_theta=10000.0):
         super().__init__()

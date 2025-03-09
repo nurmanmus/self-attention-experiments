@@ -1,11 +1,21 @@
 import torch
 import matplotlib.pyplot as plt
-from modeling.attention.mha import MHA, Rope_MHA
+from modeling.attention.mha import MHA, Rope_MHA, Decoupled_Rope_MHA
 from modeling.attention.mqa import RopelessMQA, Rope_MQA
 from modeling.attention.mla import MLA, RopelessMLA
+from modeling.attention.utils import apply_rope_x
 
 def get_attention_patterns(model, seq_len=16, d_model=64):
-    """Extract attention patterns from a single forward pass."""
+    """Extract attention patterns from a single forward pass.
+    
+    Args:
+        model: The attention module to test
+        seq_len: Length of the test sequence
+        d_model: Model dimension
+        
+    Returns:
+        torch.Tensor: Attention patterns for each head [batch, n_heads, seq_len, seq_len]
+    """
     # Create a simple input sequence
     x = torch.randn(1, seq_len, d_model)
     
@@ -83,6 +93,33 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
             # Combine Q and K heads
             q_heads = torch.cat([Q, Q_for_rope], dim=-1)  # [B, H, S, D/H]
             k_heads = torch.cat([K, K_for_rope], dim=-1)  # [B, H, S, D/H]
+        elif isinstance(module, Decoupled_Rope_MHA):
+            # Decoupled RoPE MHA case
+            B, S = x.shape[:2]
+            QV = x @ module.qkv.T  # [B, S, 2D]
+            K = x @ module.wk.T  # [B, S, n_heads*nope_dim + rope_dim]
+            
+            Q, V = torch.chunk(QV, 2, -1)  # Q: [B, S, D], V: [B, S, D]
+            Q = Q.view(B, S, module.n_heads, module.dh).transpose(1,2)  # [B, H, S, D/H]
+            
+            # Split Q into RoPE and non-RoPE parts
+            Q, Q_for_rope = torch.split(Q, [module.qk_nope_dim, module.qk_rope_dim], dim=-1)
+            
+            # Split K into RoPE and non-RoPE parts
+            K, K_for_rope = torch.split(K, [module.n_heads * module.qk_nope_dim, module.qk_rope_dim], dim=-1)
+            K = K.view(B, S, module.n_heads, module.qk_nope_dim).transpose(1,2)
+            K_for_rope = K_for_rope.view(B, S, 1, module.qk_rope_dim).transpose(1,2)
+            
+            # Apply RoPE
+            cos = module.cos_cached[:, :, :S, :module.qk_rope_dim//2].repeat(1, 1, 1, 2)
+            sin = module.sin_cached[:, :, :S, :module.qk_rope_dim//2].repeat(1, 1, 1, 2)
+            Q_for_rope = apply_rope_x(Q_for_rope, cos, sin)
+            K_for_rope = apply_rope_x(K_for_rope, cos, sin)
+            K_for_rope = K_for_rope.repeat(1, module.n_heads, 1, 1)
+            
+            # Combine Q and K parts
+            q_heads = torch.cat([Q, Q_for_rope], dim=-1)
+            k_heads = torch.cat([K, K_for_rope], dim=-1)
         else:
             raise ValueError(f"Unknown attention type: {type(module)}")
         
@@ -209,6 +246,7 @@ def main():
     models = {
         'MHA': MHA(d_model, n_heads),
         'MHA_RoPE': Rope_MHA(d_model, n_heads),
+        'MHA_Decoupled_RoPE': Decoupled_Rope_MHA(d_model, n_heads),
         'MQA': RopelessMQA(d_model, n_heads),
         'MQA_RoPE': Rope_MQA(d_model, n_heads),
         'MLA': RopelessMLA(d_model, n_heads),

@@ -1,4 +1,3 @@
-    
 '''
 fun reference https://github.com/madsys-dev/deepseekv2-profile/blob/924174cb5dc11fad24bdaad3fd820ebf87506368/workspace/blog/optimizing-mla.md
 
@@ -14,6 +13,19 @@ import math
 from .utils import apply_rope_x
 
 class RopelessMLA_Uncompressed(torch.nn.Module):
+    """Multi-Head Latent Attention without RoPE (Uncompressed KV Cache).
+    
+    Implements MLA with dimension reduction for queries and keys/values through latent projections.
+    This version maintains full KV cache without compression.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        
+    Note:
+        Projects inputs to lower-dimensional latent space before computing attention,
+        reducing computation while maintaining model quality.
+    """
 
     def __init__(self, d_model, n_heads):
         super().__init__()
@@ -24,17 +36,17 @@ class RopelessMLA_Uncompressed(torch.nn.Module):
         self.dh = d_model // n_heads
 
         # Q projections
-        self.W_dq = torch.nn.Parameter(0.01*torch.randn((d_model, self.q_proj_dim)))
-        self.W_uq = torch.nn.Parameter(0.01*torch.randn((self.q_proj_dim, d_model)))
+        self.W_dq = torch.nn.Parameter(0.02*torch.randn((d_model, self.q_proj_dim)))
+        self.W_uq = torch.nn.Parameter(0.02*torch.randn((self.q_proj_dim, d_model)))
         self.q_layernorm = torch.nn.LayerNorm(self.q_proj_dim)
 
         # KV projections
-        self.W_dkv = torch.nn.Parameter(0.01*torch.randn((d_model, self.kv_proj_dim)))
-        self.W_ukv = torch.nn.Parameter(0.01*torch.randn((self.kv_proj_dim, 2*self.d_model)))
+        self.W_dkv = torch.nn.Parameter(0.02*torch.randn((d_model, self.kv_proj_dim)))
+        self.W_ukv = torch.nn.Parameter(0.02*torch.randn((self.kv_proj_dim, 2*self.d_model)))
         self.kv_layernorm = torch.nn.LayerNorm(self.kv_proj_dim)
 
         # output projection
-        self.W_o = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        self.W_o = torch.nn.Parameter(0.02*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         # queries, keys, and values
@@ -85,6 +97,19 @@ class RopelessMLA_Uncompressed(torch.nn.Module):
         return x, (k_heads, v_heads)
 
 class RopelessMLA(torch.nn.Module):
+    """Multi-Head Latent Attention without RoPE (Compressed KV Cache).
+    
+    Implements MLA with dimension reduction and compressed KV cache.
+    Maintains latent projections in the cache to save memory.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        
+    Note:
+        Combines latent space projection with cache compression for maximum efficiency.
+    """
+
     def __init__(self, d_model, n_heads):
         super().__init__()
         self.d_model = d_model
@@ -94,17 +119,17 @@ class RopelessMLA(torch.nn.Module):
         self.dh = d_model // n_heads
         
         # Q projections
-        self.W_dq = torch.nn.Parameter(0.01*torch.randn((d_model, self.q_proj_dim)))
-        self.W_uq = torch.nn.Parameter(0.01*torch.randn((self.q_proj_dim, d_model)))
+        self.W_dq = torch.nn.Parameter(0.02*torch.randn((d_model, self.q_proj_dim)))
+        self.W_uq = torch.nn.Parameter(0.02*torch.randn((self.q_proj_dim, d_model)))
         self.q_layernorm = torch.nn.LayerNorm(self.q_proj_dim)
         
         # KV projections
-        self.W_dkv = torch.nn.Parameter(0.01*torch.randn((d_model, self.kv_proj_dim)))
-        self.W_ukv = torch.nn.Parameter(0.01*torch.randn((self.kv_proj_dim, 2*self.d_model)))
+        self.W_dkv = torch.nn.Parameter(0.02*torch.randn((d_model, self.kv_proj_dim)))
+        self.W_ukv = torch.nn.Parameter(0.02*torch.randn((self.kv_proj_dim, 2*self.d_model)))
         self.kv_layernorm = torch.nn.LayerNorm(self.kv_proj_dim)
         
         # output projection
-        self.W_o = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        self.W_o = torch.nn.Parameter(0.02*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         B, S, D = x.size()
@@ -154,6 +179,23 @@ class RopelessMLA(torch.nn.Module):
         return x, compressed_kv
     
 class MLA(torch.nn.Module):
+    """Multi-Head Latent Attention with RoPE.
+    
+    Implements MLA with RoPE and dimension reduction through latent projections.
+    Uses decoupled RoPE where only part of Q/K dimensions use positional encoding.
+    
+    Args:
+        d_model (int): Model dimension
+        n_heads (int): Number of attention heads
+        max_len (int, optional): Maximum sequence length for RoPE. Defaults to 1024.
+        rope_theta (float, optional): Base for RoPE frequency computation. Defaults to 10000.0.
+        
+    Note:
+        - Projects to lower-dimensional latent space for efficiency
+        - Uses decoupled RoPE for better position awareness
+        - Compresses KV cache in latent space
+    """
+
     def __init__(self, d_model, n_heads, max_len=1024, rope_theta=10000.0):
         super().__init__()
         self.d_model = d_model
@@ -217,6 +259,7 @@ class MLA(torch.nn.Module):
             KV_for_lora = self.kv_layernorm(KV_for_lora)
         else:
             new_kv = x @ self.W_dkv
+            new_kv = self.kv_layernorm(new_kv)
             compressed_kv = torch.cat([kv_cache, new_kv], dim=1)
             new_kv, new_K_for_rope = torch.split(new_kv,
                                                 [self.kv_proj_dim, self.qk_rope_dim],
