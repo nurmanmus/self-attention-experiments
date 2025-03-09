@@ -81,21 +81,25 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
                              padding="max_length",
                              return_tensors="pt")
             
-            # Ensure input_ids is 2D (batch_size, sequence_length)
-            input_ids = tokens["input_ids"].squeeze(0)  # Remove batch dimension if present
-            if len(input_ids.shape) == 1:
-                input_ids = input_ids.unsqueeze(0)  # Add batch dimension if needed
-            
+            # Get input_ids and ensure it's 2D
+            input_ids = tokens["input_ids"]
+            if len(input_ids.shape) == 3:  # If shape is (batch, seq_len, hidden)
+                input_ids = input_ids.view(-1, sequence_length)
+            elif len(input_ids.shape) == 1:  # If shape is (seq_len,)
+                input_ids = input_ids.unsqueeze(0)  # Add batch dimension
+                
             tokenized_texts.append(input_ids)
             source_texts.append((source, text[:100] + "..." if len(text) > 100 else text))
         
         # Stack tensors
         if tokenized_texts:
             input_tensor = torch.cat(tokenized_texts, dim=0)
+            # Ensure final shape is (batch_size, sequence_length)
+            if len(input_tensor.shape) > 2:
+                input_tensor = input_tensor.view(-1, sequence_length)
         else:
             print("Warning: No valid samples found in the dataset, using random data")
             input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
-            return input_tensor, [("random", "Random text") for _ in range(num_samples)]
             
         return input_tensor, source_texts
         
@@ -116,7 +120,8 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
     
     # Ensure input is 2D (batch_size, sequence_length)
     if len(x.shape) > 2:
-        x = x.view(x.size(0), -1)
+        batch_size = x.size(0)
+        x = x.view(batch_size, -1)
     
     with torch.no_grad():
         _ = model(x)
@@ -132,7 +137,8 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_r
     
     # Ensure input is 2D (batch_size, sequence_length)
     if len(x.shape) > 2:
-        x = x.view(x.size(0), -1)
+        batch_size = x.size(0)
+        x = x.view(batch_size, -1)
     
     # Warmup
     with torch.no_grad():
@@ -157,7 +163,8 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     
     # Ensure input is 2D (batch_size, sequence_length)
     if len(x.shape) > 2:
-        x = x.view(x.size(0), -1)
+        batch_size = x.size(0)
+        x = x.view(batch_size, -1)
     
     with torch.no_grad():
         # Get attention weights from the model's forward pass
@@ -173,7 +180,7 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     os.makedirs("figures", exist_ok=True)
     
     # Analyze patterns for each sample
-    for sample_idx in range(num_samples):
+    for sample_idx in range(min(num_samples, len(source_texts))):
         source, text = source_texts[sample_idx]
         
         # Plot attention patterns for each layer
