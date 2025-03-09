@@ -13,18 +13,21 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
     attention_patterns = []
     def hook_fn(module, input, output):
         # Get attention weights before softmax
-        q, k, v = input
+        # For MHA/MQA/MLA, the module itself is the attention module
+        q = input[0]  # B, H, S, D
+        k = input[1]  # B, H, S, D
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) / (d_model ** 0.5)
         attention_patterns.append(attn_weights.detach())
     
-    # Add hook to the attention module
-    for name, module in model.named_modules():
-        if 'attention' in name.lower():
-            module.register_forward_hook(hook_fn)
+    # Register hook directly on the model since it is the attention module
+    model.register_forward_hook(hook_fn)
     
     # Forward pass
     with torch.no_grad():
         model(x)
+    
+    if not attention_patterns:
+        raise ValueError(f"No attention patterns captured for {type(model).__name__}")
     
     return attention_patterns[0]
 
@@ -103,42 +106,51 @@ def main():
     print("Testing attention patterns...")
     for name, model in models.items():
         print(f"\nAnalyzing {name}...")
-        patterns = get_attention_patterns(model, seq_len, d_model)
-        print(f"Attention pattern shape: {patterns.shape}")
-        
-        # Plot patterns
-        fig = plot_attention_patterns(patterns, name)
-        plt.savefig(f'attention_patterns_{name.lower()}.png')
-        plt.close()
-        
-        # Additional analysis
-        if 'MQA' in name:
-            # Check if patterns are shared across heads
-            head_similarity = torch.corrcoef(patterns[0].reshape(n_heads, -1))
-            print(f"Average head similarity: {head_similarity.mean().item():.4f}")
-        elif 'MLA' in name:
-            # Check rank of attention patterns
-            U, S, V = torch.svd(patterns[0].reshape(n_heads, -1))
-            effective_rank = (S > 1e-5).sum().item()
-            print(f"Effective rank: {effective_rank}")
+        try:
+            patterns = get_attention_patterns(model, seq_len, d_model)
+            print(f"Attention pattern shape: {patterns.shape}")
+            
+            # Plot patterns
+            fig = plot_attention_patterns(patterns, name)
+            plt.savefig(f'attention_patterns_{name.lower()}.png')
+            plt.close()
+            
+            # Additional analysis
+            if 'MQA' in name:
+                # Check if patterns are shared across heads
+                head_similarity = torch.corrcoef(patterns[0].reshape(n_heads, -1))
+                print(f"Average head similarity: {head_similarity.mean().item():.4f}")
+            elif 'MLA' in name:
+                # Check rank of attention patterns
+                U, S, V = torch.svd(patterns[0].reshape(n_heads, -1))
+                effective_rank = (S > 1e-5).sum().item()
+                print(f"Effective rank: {effective_rank}")
+        except Exception as e:
+            print(f"Error analyzing {name}: {str(e)}")
     
     print("\nTesting KV cache consistency...")
     for name, model in models.items():
-        max_diff = test_kv_cache(model, seq_len, d_model)
-        print(f"{name} KV cache max difference: {max_diff:.6f}")
-        print(f"KV cache {'consistent' if max_diff < 1e-5 else 'inconsistent'}")
+        try:
+            max_diff = test_kv_cache(model, seq_len, d_model)
+            print(f"{name} KV cache max difference: {max_diff:.6f}")
+            print(f"KV cache {'consistent' if max_diff < 1e-5 else 'inconsistent'}")
+        except Exception as e:
+            print(f"Error testing KV cache for {name}: {str(e)}")
     
     print("\nTesting position sensitivity...")
     for name, model in models.items():
-        diff = test_position_sensitivity(model, seq_len, d_model)
-        expected_sensitive = 'RoPE' in name
-        actual_sensitive = diff > 0.1
-        
-        print(f"\n{name}:")
-        print(f"Position sensitivity: {diff:.6f}")
-        print(f"Expected to be position sensitive: {expected_sensitive}")
-        print(f"Actually position sensitive: {actual_sensitive}")
-        print(f"Matches expectations: {expected_sensitive == actual_sensitive}")
+        try:
+            diff = test_position_sensitivity(model, seq_len, d_model)
+            expected_sensitive = 'RoPE' in name
+            actual_sensitive = diff > 0.1
+            
+            print(f"\n{name}:")
+            print(f"Position sensitivity: {diff:.6f}")
+            print(f"Expected to be position sensitive: {expected_sensitive}")
+            print(f"Actually position sensitive: {actual_sensitive}")
+            print(f"Matches expectations: {expected_sensitive == actual_sensitive}")
+        except Exception as e:
+            print(f"Error testing position sensitivity for {name}: {str(e)}")
 
 if __name__ == '__main__':
     main() 
