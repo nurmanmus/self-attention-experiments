@@ -448,11 +448,20 @@ def compute_model_outputs(model, input_ids, device):
                     print(f"Predictions shape: {predictions.shape}")
                     
                     # Move everything to CPU and maintain shapes
-                    return {
-                        'logits': logits.cpu(),      # Shape: (batch_size, seq_len, vocab_size)
-                        'probs': probs.cpu(),        # Shape: (batch_size, seq_len, vocab_size)
-                        'predictions': predictions.cpu()  # Shape: (batch_size, seq_len)
+                    outputs_dict = {
+                        'logits': logits.cpu().to(torch.float32),      # Shape: (batch_size, seq_len, vocab_size)
+                        'probs': probs.cpu().to(torch.float32),        # Shape: (batch_size, seq_len, vocab_size)
+                        'predictions': predictions.cpu()                # Shape: (batch_size, seq_len)
                     }
+                    
+                    # Verify shapes are consistent
+                    print("\nVerifying output shapes:")
+                    print(f"  logits: {outputs_dict['logits'].shape}")
+                    print(f"  probs: {outputs_dict['probs'].shape}")
+                    print(f"  predictions: {outputs_dict['predictions'].shape}")
+                    
+                    return outputs_dict
+                    
             except RuntimeError as e:
                 print(f"Runtime error during model computation: {str(e)}")
                 print(f"CUDA memory allocated: {torch.cuda.memory_allocated()/1024/1024/1024:.2f} GB")
@@ -639,16 +648,12 @@ def evaluate_attention_mechanisms(num_samples=32):
         'validation_results': {}
     }
     
-    # Initialize models for all attention mechanisms
+    # Initialize models for RoPE attention mechanisms only
     models = {}
     attention_types = [
-        'mha',              # Standard Multi-Head Attention
         'mha_rope',         # Multi-Head Attention with RoPE
-        'mqa',              # Multi-Query Attention
         'mqa_rope',         # Multi-Query Attention with RoPE
-        'mla',              # Multi-Level Attention (Ropeless, compressed)
         'mla_rope',         # Multi-Level Attention with RoPE
-        'mla_uncompressed'  # Multi-Level Attention (Ropeless, uncompressed)
     ]
     
     for attn_type in attention_types:
@@ -664,7 +669,8 @@ def evaluate_attention_mechanisms(num_samples=32):
     # Generate test data for validation
     print("\nPreparing validation data...")
     try:
-        validation_inputs, _ = load_test_data(tokenizer, sequence_length=512, num_samples=4)
+        # Use smaller sequence length and batch size for validation
+        validation_inputs, _ = load_test_data(tokenizer, sequence_length=128, num_samples=2)
     except Exception as e:
         print(f"Error loading validation data: {str(e)}")
         return results
@@ -679,9 +685,9 @@ def evaluate_attention_mechanisms(num_samples=32):
         print("No valid models to validate")
         return results
     
-    # Adjusted test parameters for A100
-    sequence_lengths = [512, 1024, 2048]
-    batch_sizes = [1, 4, 16]  # Reduced batch sizes
+    # Adjusted test parameters
+    sequence_lengths = [128, 256, 512]  # Reduced sequence lengths
+    batch_sizes = [1, 2, 4]  # Reduced batch sizes
     
     def display_metrics(attn_type, memory_results, speed_results, kqv_metrics):
         """Display performance metrics for the current attention mechanism."""
@@ -717,7 +723,7 @@ def evaluate_attention_mechanisms(num_samples=32):
         print("\n" + "="*60)
     
     # Evaluate each attention mechanism
-    for attn_type in ['mha', 'mqa', 'mla']:
+    for attn_type in attention_types:
         print(f"\nEvaluating {attn_type.upper()}...")
         
         try:
