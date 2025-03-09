@@ -311,17 +311,35 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
         # Calculate and plot head importance
         head_importance = torch.zeros(len(attention_weights), attention_weights[0].size(1))
         for layer_idx, layer_attention in enumerate(attention_weights):
-            # Calculate importance as the mean attention weight for each head
-            head_importance[layer_idx] = layer_attention[sample_idx].mean(dim=(1, 2))
+            # Get attention weights for current layer and sample
+            attn = layer_attention[sample_idx]  # shape: (n_heads, seq_len, seq_len)
+            
+            # Calculate entropy and concentration for each head
+            for head_idx in range(attn.size(0)):
+                head_attn = attn[head_idx]  # shape: (seq_len, seq_len)
+                
+                # Calculate attention entropy (lower means more focused attention)
+                entropy = -(head_attn * torch.log(head_attn + 1e-9)).sum(dim=-1).mean()
+                
+                # Calculate attention concentration (higher means more concentrated attention)
+                concentration = torch.max(head_attn, dim=-1)[0].mean()
+                
+                # Combine metrics into importance score
+                # Higher concentration and lower entropy indicate more specialized heads
+                head_importance[layer_idx, head_idx] = concentration.item() * (1 - entropy.item())
+        
+        # Normalize importance scores
+        head_importance = (head_importance - head_importance.min()) / (head_importance.max() - head_importance.min() + 1e-9)
         
         # Plot head importance heatmap
         plt.figure(figsize=(10, 6))
         sns.heatmap(head_importance.numpy(), 
                    annot=True, 
                    fmt='.2f',
-                   cmap='YlOrRd')
-        plt.title(f'Head Importance - {source}')
-        plt.xlabel('Head')
+                   cmap='YlOrRd',
+                   vmin=0, vmax=1)
+        plt.title(f'Head Importance - {source}\nBased on attention entropy and concentration')
+        plt.xlabel('Head Index')
         plt.ylabel('Layer')
         plt.savefig(f'figures/head_importance_sample{sample_idx}.png',
                    bbox_inches='tight', dpi=300)
