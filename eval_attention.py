@@ -237,7 +237,10 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     # Register hooks for each attention layer
     hooks = []
     for name, module in model.named_modules():
-        if any(attn_type in name.lower() for attn_type in ['mha', 'mqa', 'mla']):
+        # Only hook the main attention modules, not their sub-components
+        if name.endswith('.mha') and isinstance(module, (
+            model.layers[0].mha.__class__,  # Use the type of first layer's attention module
+        )):
             print(f"Registering hook for {name}: {type(module)}")
             hook = module.register_forward_hook(attention_hook)
             hooks.append(hook)
@@ -326,7 +329,7 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     
     return attention_weights
 
-def evaluate_attention_mechanisms(num_samples=1000):
+def evaluate_attention_mechanisms(num_samples=5):
     """Evaluate different attention mechanisms."""
     print("Using device:", device)
     
@@ -337,9 +340,27 @@ def evaluate_attention_mechanisms(num_samples=1000):
         'attention_patterns': {}
     }
     
-    # Test parameters
-    sequence_lengths = [512, 1024]
-    batch_sizes = [1, 4, 16]
+    # Test parameters - reduced sizes for testing
+    sequence_lengths = [128, 256]  # Reduced from [512, 1024]
+    batch_sizes = [1, 2]  # Reduced from [1, 4, 16]
+    
+    def display_metrics(attn_type, memory_results, speed_results):
+        """Display performance metrics for the current attention mechanism."""
+        print(f"\n{attn_type.upper()} Performance Metrics:")
+        print("\nMemory Usage (MB):")
+        print("-" * 50)
+        print(f"{'Config':<15} {'Memory (MB)':<10}")
+        print("-" * 50)
+        for config, memory in memory_results.items():
+            print(f"{config:<15} {memory:>10.2f}")
+        
+        print("\nInference Speed (seconds):")
+        print("-" * 50)
+        print(f"{'Config':<15} {'Time (s)':<10}")
+        print("-" * 50)
+        for config, speed in speed_results.items():
+            print(f"{config:<15} {speed:>10.5f}")
+        print("\n" + "="*50)
     
     # Evaluate each attention mechanism
     for attn_type in ['mha', 'mqa', 'mla']:
@@ -362,23 +383,55 @@ def evaluate_attention_mechanisms(num_samples=1000):
                 memory_results[f'b{batch_size}_s{seq_len}'] = memory_used
         results['memory_usage'][attn_type] = memory_results
         
-        # Inference speed
+        # Inference speed - reduced number of runs
         print("Measuring inference speed...")
         speed_results = {}
         for seq_len in sequence_lengths:
             for batch_size in batch_sizes:
                 avg_time = measure_inference_speed(model, device, tokenizer,
-                                                input_size=(batch_size, seq_len))
+                                                input_size=(batch_size, seq_len),
+                                                num_runs=10)  # Reduced from 100
                 speed_results[f'b{batch_size}_s{seq_len}'] = avg_time
         results['inference_speed'][attn_type] = speed_results
         
-        # Attention patterns
+        # Display current metrics
+        display_metrics(attn_type, memory_results, speed_results)
+        
+        # Attention patterns - reduced sequence length and samples
         print("Analyzing attention patterns...")
         attention_weights = analyze_attention_patterns(model, device, tokenizer,
-                                                    sequence_length=1024,
-                                                    num_samples=5)
+                                                    sequence_length=256,  # Reduced from 1024
+                                                    num_samples=2)  # Reduced from 5
         results['attention_patterns'][attn_type] = attention_weights
         
+        # Clear GPU memory after each model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    # Display final comparative metrics
+    print("\nComparative Performance Summary:")
+    print("=" * 50)
+    
+    print("\nMemory Usage Comparison (MB):")
+    print("-" * 70)
+    print(f"{'Config':<15} {'MHA':>10} {'MQA':>10} {'MLA':>10}")
+    print("-" * 70)
+    for config in results['memory_usage']['mha'].keys():
+        print(f"{config:<15}", end="")
+        for attn_type in ['mha', 'mqa', 'mla']:
+            print(f"{results['memory_usage'][attn_type][config]:>10.2f}", end="")
+        print()
+    
+    print("\nInference Speed Comparison (seconds):")
+    print("-" * 70)
+    print(f"{'Config':<15} {'MHA':>10} {'MQA':>10} {'MLA':>10}")
+    print("-" * 70)
+    for config in results['inference_speed']['mha'].keys():
+        print(f"{config:<15}", end="")
+        for attn_type in ['mha', 'mqa', 'mla']:
+            print(f"{results['inference_speed'][attn_type][config]:>10.5f}", end="")
+        print()
+    
     return results
 
 def display_all_figures():
@@ -410,17 +463,30 @@ def display_all_figures():
     # Display figures by group
     for group, files in grouped_figures.items():
         print(f"\n{group}:")
-        for filename in files:
+        
+        # Calculate grid dimensions
+        n_files = len(files)
+        n_cols = min(3, n_files)  # Maximum 3 columns
+        n_rows = (n_files + n_cols - 1) // n_cols  # Ceiling division
+        
+        # Create a figure with subplots
+        fig = plt.figure(figsize=(6*n_cols, 4*n_rows))
+        
+        for idx, filename in enumerate(files, 1):
             file_path = os.path.join("figures", filename)
             file_size = os.path.getsize(file_path) / 1024  # KB
             print(f"- {filename} ({file_size:.1f} KB)")
             
-            # Display the figure if in a notebook environment
-            try:
-                from IPython.display import Image, display
-                display(Image(filename=file_path))
-            except ImportError:
-                print(f"  (Figure saved at: {file_path})")
+            # Add subplot
+            plt.subplot(n_rows, n_cols, idx)
+            img = plt.imread(file_path)
+            plt.imshow(img)
+            plt.axis('off')
+            plt.title(os.path.splitext(filename)[0], fontsize=8, pad=2)
+        
+        plt.tight_layout()
+        plt.show()
+        plt.close()
 
 if __name__ == "__main__":
     print("Using device:", device)
@@ -432,7 +498,7 @@ if __name__ == "__main__":
     
     # Run evaluation
     try:
-        results = evaluate_attention_mechanisms(num_samples=1000)
+        results = evaluate_attention_mechanisms(num_samples=5)
         
         # Display figures if in notebook environment
         display_all_figures()
