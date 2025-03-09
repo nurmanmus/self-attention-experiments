@@ -24,27 +24,29 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
             k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
         elif isinstance(module, (MHA, Rope_MHA)):
             # MHA case
-            Q = x @ module.wq.T
-            K = x @ module.wk.T
-            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
-            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, -1).transpose(1, 2)
+            QKV = x @ module.qkv
+            Q, K, V = torch.chunk(QKV, 3, -1)
+            head_dim = d_model // module.n_heads
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)
+            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)
         elif isinstance(module, (RopelessMLA, MLA)):
             # MLA case
-            compressed_q = x @ module.W_dq
-            Q = compressed_q @ module.W_uq
-            compressed_kv = x @ module.W_dkv
+            compressed_q = x @ module.W_dq  # B, S, q_proj_dim
+            Q = compressed_q @ module.W_uq  # B, S, D
+            compressed_kv = x @ module.W_dkv  # B, S, kv_proj_dim
             if hasattr(module, 'W_ukv'):
-                KV = compressed_kv @ module.W_ukv
-                K, _ = torch.chunk(KV, 2, -1)
+                KV = compressed_kv @ module.W_ukv  # B, S, 2D
+                K, _ = torch.chunk(KV, 2, -1)  # B, S, D
             else:
-                K = module.kv_layernorm(compressed_kv)
-            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
-            k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
+                K = module.kv_layernorm(compressed_kv)  # B, S, D
+            head_dim = d_model // module.n_heads
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, head_dim).transpose(1, 2)  # B, H, S, D/H
+            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, head_dim).transpose(1, 2)  # B, H, S, D/H
         else:
             raise ValueError(f"Unknown attention type: {type(module)}")
         
         # Compute attention weights
-        attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / (module.d_model ** 0.5)
+        attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / (head_dim ** 0.5)
         attention_patterns.append(attn_weights.detach())
     
     # Register hook directly on the model since it is the attention module
