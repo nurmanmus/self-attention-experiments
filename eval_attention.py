@@ -3,19 +3,20 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 from modeling.gpt import GPTModel
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 import psutil
 import os
 
-def measure_memory_usage(model, device, input_size=(1, 512, 512)):
+def measure_memory_usage(model, device, input_size=(1, 512)):
     """Measure peak memory usage of the model during forward and backward pass"""
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     
-    x = torch.randn(*input_size).to(device)
+    # Generate random token indices as input
+    x = torch.randint(0, model.vocab_size, input_size).to(device)
     
     # Forward pass
-    with autocast():
+    with autocast('cuda'):
         start_mem = torch.cuda.memory_allocated()
         out, _ = model(x)
         forward_mem = torch.cuda.memory_allocated() - start_mem
@@ -31,20 +32,20 @@ def measure_memory_usage(model, device, input_size=(1, 512, 512)):
         'total_memory_mb': (forward_mem + backward_mem) / 1024**2
     }
 
-def measure_inference_speed(model, device, input_size=(1, 512, 512), n_runs=100):
+def measure_inference_speed(model, device, input_size=(1, 512), n_runs=100):
     """Measure average inference time"""
-    x = torch.randn(*input_size).to(device)
+    x = torch.randint(0, model.vocab_size, input_size).to(device)
     times = []
     
     # Warmup
     for _ in range(10):
-        with torch.no_grad(), autocast():
+        with torch.no_grad(), autocast('cuda'):
             model(x)
     
     # Measure
     for _ in range(n_runs):
         start_time = time.time()
-        with torch.no_grad(), autocast():
+        with torch.no_grad(), autocast('cuda'):
             model(x)
         times.append(time.time() - start_time)
     
@@ -53,13 +54,13 @@ def measure_inference_speed(model, device, input_size=(1, 512, 512), n_runs=100)
         'std_time_ms': np.std(times) * 1000
     }
 
-def analyze_attention_patterns(model, device, input_size=(1, 512, 512)):
+def analyze_attention_patterns(model, device, input_size=(1, 512)):
     """Analyze attention patterns for each mechanism"""
-    x = torch.randn(*input_size).to(device)
+    x = torch.randint(0, model.vocab_size, input_size).to(device)
     
     # Get attention weights
     model.eval()
-    with torch.no_grad(), autocast():
+    with torch.no_grad(), autocast('cuda'):
         _, cache = model(x)
     
     # Extract attention weights from the last layer
@@ -134,18 +135,18 @@ def evaluate_attention_mechanisms(sequence_length=512, d_model=512):
         # 1. Memory Usage
         print("Measuring memory usage...")
         results[name].update(
-            measure_memory_usage(model, device, input_size=(1, sequence_length, d_model))
+            measure_memory_usage(model, device, input_size=(1, sequence_length))
         )
         
         # 2. Inference Speed
         print("Measuring inference speed...")
         results[name].update(
-            measure_inference_speed(model, device, input_size=(1, sequence_length, d_model))
+            measure_inference_speed(model, device, input_size=(1, sequence_length))
         )
         
         # 3. Attention Patterns
         print("Analyzing attention patterns...")
-        attn_stats = analyze_attention_patterns(model, device, input_size=(1, sequence_length, d_model))
+        attn_stats = analyze_attention_patterns(model, device, input_size=(1, sequence_length))
         if attn_stats:
             results[name].update(attn_stats)
         
