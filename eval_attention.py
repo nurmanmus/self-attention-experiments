@@ -168,185 +168,6 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_r
     avg_time = (end_time - start_time) / num_runs
     return avg_time
 
-def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, num_samples=5):
-    """Analyze and visualize attention patterns."""
-    model.eval()
-    x, source_texts = load_test_data(tokenizer, sequence_length=sequence_length, num_samples=num_samples)
-    x = x.to(device)
-    
-    # Ensure input is 2D (batch_size, sequence_length)
-    if len(x.shape) > 2:
-        batch_size = x.size(0)
-        x = x.view(batch_size, -1)
-    
-    # Create a hook to capture attention weights
-    attention_weights = []
-    
-    def attention_hook(module, inputs, outputs):
-        try:
-            # Extract q, k, v from the module's forward pass
-            if hasattr(module, 'qkv'):
-                # For MHA
-                B, S, D = inputs[0].shape
-                QKV = inputs[0] @ module.qkv.T
-                Q, K, V = torch.chunk(QKV, 3, -1)
-                dh = D // module.n_heads
-                q_heads = Q.view(B, S, module.n_heads, dh).transpose(1, 2)
-                k_heads = K.view(B, S, module.n_heads, dh).transpose(1, 2)
-                
-            elif hasattr(module, 'wq') and hasattr(module, 'wkv'):
-                # For MQA
-                B, S, D = inputs[0].shape
-                Q = inputs[0] @ module.wq.T
-                KV = inputs[0] @ module.wkv
-                K, V = torch.chunk(KV, 2, -1)
-                dh = D // module.n_heads
-                q_heads = Q.view(B, S, module.n_heads, dh).transpose(1, 2)
-                k_heads = K.unsqueeze(2).expand(B, -1, module.n_heads, -1).view(B, -1, module.n_heads, dh).transpose(1, 2)
-                
-            elif hasattr(module, 'W_dq') and hasattr(module, 'W_dkv'):
-                # For MLA
-                B, S, D = inputs[0].shape
-                compressed_q = inputs[0] @ module.W_dq
-                compressed_q = module.q_layernorm(compressed_q)
-                Q = compressed_q @ module.W_uq
-                compressed_kv = inputs[0] @ module.W_dkv
-                compressed_kv = module.kv_layernorm(compressed_kv)
-                KV = compressed_kv @ module.W_ukv
-                K, V = torch.split(KV, module.d_model, dim=-1)
-                q_heads = Q.view(B, -1, module.n_heads, module.dh).transpose(1, 2)
-                k_heads = K.view(B, -1, module.n_heads, module.dh).transpose(1, 2)
-            
-            # Compute attention scores
-            d_k = q_heads.size(-1)
-            scores = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / math.sqrt(d_k)
-            
-            # Get attention weights through softmax
-            weights = torch.softmax(scores, dim=-1)
-            attention_weights.append(weights.detach().cpu())
-            
-        except Exception as e:
-            print(f"Error in attention hook: {str(e)}")
-            print(f"Module type: {type(module)}")
-            print(f"Input shapes: {[x.shape for x in inputs]}")
-            if isinstance(outputs, tuple):
-                print(f"Output shapes: {[x.shape for x in outputs]}")
-            else:
-                print(f"Output shape: {outputs.shape}")
-    
-    # Register hooks for each attention layer
-    hooks = []
-    for name, module in model.named_modules():
-        # Only hook the main attention modules, not their sub-components
-        if name.endswith('.mha') and isinstance(module, (
-            model.layers[0].mha.__class__,  # Use the type of first layer's attention module
-        )):
-            print(f"Registering hook for {name}: {type(module)}")
-            hook = module.register_forward_hook(attention_hook)
-            hooks.append(hook)
-    
-    with torch.no_grad():
-        try:
-            # Forward pass to get attention weights
-            outputs = model(x)
-            
-            # Remove hooks
-            for hook in hooks:
-                hook.remove()
-            
-            if not attention_weights:
-                print("Warning: No attention weights captured during forward pass")
-                print("\nModel architecture:")
-                for name, module in model.named_modules():
-                    print(f"- {name}: {type(module)}")
-                return None
-                
-            # Verify attention weights format
-            print(f"\nNumber of attention layers: {len(attention_weights)}")
-            for i, layer_weights in enumerate(attention_weights):
-                print(f"Layer {i} attention weights shape: {layer_weights.shape}")
-                
-        except Exception as e:
-            print(f"Error during forward pass: {str(e)}")
-            print("\nModel architecture:")
-            for name, module in model.named_modules():
-                print(f"- {name}: {type(module)}")
-            raise e
-    
-    # Create directory for figures if it doesn't exist
-    os.makedirs("figures", exist_ok=True)
-    
-    # Analyze patterns for each sample
-    for sample_idx in range(min(num_samples, len(source_texts))):
-        source, text = source_texts[sample_idx]
-        
-        # Plot attention patterns for each layer
-        for layer_idx, layer_attention in enumerate(attention_weights):
-            # Ensure layer_attention is the right shape (batch, heads, seq, seq)
-            if len(layer_attention.shape) == 4:
-                layer_weights = layer_attention[sample_idx].cpu()
-            else:
-                print(f"Warning: Unexpected attention weight shape: {layer_attention.shape}")
-                continue
-            
-            # Average across heads for visualization
-            avg_attention = layer_weights.mean(dim=0).numpy()
-            
-            # Create heatmap
-            plt.figure(figsize=(12, 8))
-            sns.heatmap(avg_attention, cmap='viridis')
-            plt.title(f'Attention Pattern - {source}\nLayer {layer_idx + 1}')
-            plt.xlabel('Key Position')
-            plt.ylabel('Query Position')
-            
-            # Add sample text as subtitle
-            plt.figtext(0.5, -0.1, f"Sample text: {text}", 
-                       wrap=True, horizontalalignment='center', fontsize=8)
-            
-            # Save figure
-            plt.savefig(f'figures/attention_pattern_sample{sample_idx}_layer{layer_idx+1}.png',
-                       bbox_inches='tight', dpi=300)
-            plt.close()
-        
-        # Calculate and plot head importance
-        head_importance = torch.zeros(len(attention_weights), attention_weights[0].size(1))
-        for layer_idx, layer_attention in enumerate(attention_weights):
-            # Get attention weights for current layer and sample
-            attn = layer_attention[sample_idx]  # shape: (n_heads, seq_len, seq_len)
-            
-            # Calculate entropy and concentration for each head
-            for head_idx in range(attn.size(0)):
-                head_attn = attn[head_idx]  # shape: (seq_len, seq_len)
-                
-                # Calculate attention entropy (lower means more focused attention)
-                entropy = -(head_attn * torch.log(head_attn + 1e-9)).sum(dim=-1).mean()
-                
-                # Calculate attention concentration (higher means more concentrated attention)
-                concentration = torch.max(head_attn, dim=-1)[0].mean()
-                
-                # Combine metrics into importance score
-                # Higher concentration and lower entropy indicate more specialized heads
-                head_importance[layer_idx, head_idx] = concentration.item() * (1 - entropy.item())
-        
-        # Normalize importance scores
-        head_importance = (head_importance - head_importance.min()) / (head_importance.max() - head_importance.min() + 1e-9)
-        
-        # Plot head importance heatmap
-        plt.figure(figsize=(10, 6))
-        sns.heatmap(head_importance.numpy(), 
-                   annot=True, 
-                   fmt='.2f',
-                   cmap='YlOrRd',
-                   vmin=0, vmax=1)
-        plt.title(f'Head Importance - {source}\nBased on attention entropy and concentration')
-        plt.xlabel('Head Index')
-        plt.ylabel('Layer')
-        plt.savefig(f'figures/head_importance_sample{sample_idx}.png',
-                   bbox_inches='tight', dpi=300)
-        plt.close()
-    
-    return attention_weights
-
 def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512), num_runs=10):
     """Measure performance metrics for KQV cache computation."""
     x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
@@ -457,8 +278,7 @@ def evaluate_attention_mechanisms(num_samples=5):
     results = {
         'memory_usage': {},
         'inference_speed': {},
-        'attention_patterns': {},
-        'kqv_cache_metrics': {}  # New field for KQV cache metrics
+        'kqv_cache_metrics': {}
     }
     
     # Test parameters
@@ -540,13 +360,6 @@ def evaluate_attention_mechanisms(num_samples=5):
         # Display current metrics
         display_metrics(attn_type, memory_results, speed_results, kqv_metrics)
         
-        # Attention patterns
-        print("Analyzing attention patterns...")
-        attention_weights = analyze_attention_patterns(model, device, tokenizer,
-                                                    sequence_length=256,
-                                                    num_samples=2)
-        results['attention_patterns'][attn_type] = attention_weights
-        
         # Clear GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -592,86 +405,6 @@ def evaluate_attention_mechanisms(num_samples=5):
     
     return results
 
-def display_all_figures():
-    """Display all generated figures in the notebook environment."""
-    if not os.path.exists("figures"):
-        print("No figures directory found.")
-        return
-        
-    figure_files = sorted(os.listdir("figures"))
-    if not figure_files:
-        print("No figures found in the figures directory.")
-        return
-    
-    # Import display tools
-    try:
-        from IPython.display import display, Image
-        from matplotlib import pyplot as plt
-    except ImportError:
-        print("Could not import IPython display modules")
-        return
-    
-    # Group figures by type
-    grouped_figures = {}
-    for filename in figure_files:
-        if filename.endswith('.png'):
-            if 'attention_pattern' in filename:
-                group = 'Attention Patterns'
-            elif 'head_importance' in filename:
-                group = 'Head Importance'
-            else:
-                group = 'Other'
-            
-            if group not in grouped_figures:
-                grouped_figures[group] = []
-            grouped_figures[group].append(filename)
-    
-    # Display figures by group
-    for group, files in grouped_figures.items():
-        print(f"\n{group}:")
-        
-        try:
-            # Calculate grid dimensions
-            n_files = len(files)
-            n_cols = min(3, n_files)  # Maximum 3 columns
-            n_rows = (n_files + n_cols - 1) // n_cols  # Ceiling division
-            
-            # Create a figure with subplots
-            plt.figure(figsize=(8*n_cols, 6*n_rows))
-            
-            for idx, filename in enumerate(files, 1):
-                file_path = os.path.join("figures", filename)
-                file_size = os.path.getsize(file_path) / 1024  # KB
-                print(f"- {filename} ({file_size:.1f} KB)")
-                
-                # Add subplot
-                plt.subplot(n_rows, n_cols, idx)
-                img = plt.imread(file_path)
-                plt.imshow(img)
-                plt.axis('off')
-                plt.title(os.path.splitext(filename)[0], fontsize=8, pad=2)
-            
-            plt.tight_layout(pad=3.0)
-            plt.show()
-            plt.close()
-            
-        except Exception as e:
-            print(f"Error displaying {group}: {str(e)}")
-            # Fallback to individual image display
-            for filename in files:
-                file_path = os.path.join("figures", filename)
-                try:
-                    img = plt.imread(file_path)
-                    plt.figure(figsize=(12, 8))
-                    plt.imshow(img)
-                    plt.axis('off')
-                    plt.title(os.path.splitext(filename)[0])
-                    plt.show()
-                    plt.close()
-                except Exception as e:
-                    print(f"Error displaying {filename}: {str(e)}")
-                    continue
-
 if __name__ == "__main__":
     print("Using device:", device)
     print("Loading tokenizer...")
@@ -683,8 +416,5 @@ if __name__ == "__main__":
     # Run evaluation
     try:
         results = evaluate_attention_mechanisms(num_samples=5)
-        
-        # Display figures if in notebook environment
-        display_all_figures()
     except Exception as e:
         print(f"Error during evaluation: {str(e)}") 
