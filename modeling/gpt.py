@@ -65,45 +65,23 @@ class GPTModel(torch.nn.Module):
                  use_decoupled=False):
         super().__init__()
         self.use_rope = use_rope
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.max_seq_len = max_seq_len
 
-        # Initialize with fixed seed for reproducibility
-        torch.manual_seed(42)
-        torch.cuda.manual_seed_all(42)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-        # Initialize embeddings with consistent scale
         self.word_embeddings = CustomEmbedding(vocab_size, d_model)
         if use_rope == False:
             self.position_embeddings = CustomEmbedding(max_seq_len, d_model)
 
-        # Initialize transformer layers with consistent configuration
         self.layers = torch.nn.ModuleList([
             TransformerDecoderBlock(d_model, n_heads,
-                                  use_mla=use_mla, use_mqa=use_mqa,
-                                  cache_compress=cache_compress,
-                                  use_rope=use_rope,
-                                  use_decoupled=use_decoupled)
+                                    use_mla=use_mla, use_mqa=use_mqa,
+                                    cache_compress=cache_compress,
+                                    use_rope=use_rope,
+                                    use_decoupled=use_decoupled)
             for _ in range(layers)
         ])
 
-        # Initialize output layer with consistent scale
         self.fc_out = CustomLinear(d_model, vocab_size)
 
-        # Apply consistent initialization
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, (CustomLinear, CustomEmbedding)):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if hasattr(module, 'bias') and module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, torch.nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+        self.max_seq_len = max_seq_len
 
     @torch.autocast(device_type="cuda")
     def forward(self, x, kv_cache=None, past_length=0):

@@ -25,8 +25,8 @@ def construct_dataset(data_txt_file, sequence_length=256):
 
     # get all samples
     print("loading data...")
-    with open(data_txt_file, "r", encoding="utf-8") as f:
-        samples = f.readlines()
+    f = open(data_txt_file, "r")
+    samples = f.readlines()
 
     # ----------------------------------------
     dataset = []

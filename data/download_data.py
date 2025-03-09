@@ -20,5 +20,6 @@ for entry in ds:
 	text = " ".join(text.split()) # remove sequences of whitespace
 	lines.append(text+"\n")
 
-with open("data.txt", "w", encoding="utf-8") as f:
-	f.writelines(lines)
+f = open("data.txt", "w")
+f.writelines(lines)
+f.close()
