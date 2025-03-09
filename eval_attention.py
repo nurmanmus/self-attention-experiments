@@ -64,17 +64,24 @@ def initialize_model(attn_type):
     use_rope = 'rope' in attn_type
     cache_compress = not ('uncompressed' in attn_type)
     
-    model = GPTModel(
-        d_model=512,  # More realistic model size
-        n_heads=8,    # Standard number of heads
-        layers=12,    # Standard number of layers
-        vocab_size=50257,  # GPT-2 vocab size
-        max_seq_len=2048,  # Increased max sequence length
-        use_mla=use_mla,
-        use_mqa=use_mqa,
-        use_rope=use_rope,
-        cache_compress=cache_compress
-    )
+    # Fixed model dimensions for consistency
+    model_config = {
+        'd_model': 512,      # Model dimension
+        'n_heads': 8,        # Number of attention heads
+        'layers': 12,        # Number of transformer layers
+        'vocab_size': 50257, # GPT-2 vocab size
+        'max_seq_len': 2048, # Maximum sequence length
+        'use_mla': use_mla,
+        'use_mqa': use_mqa,
+        'use_rope': use_rope,
+        'cache_compress': cache_compress
+    }
+    
+    print(f"\nInitializing {attn_type.upper()} model with config:")
+    for k, v in model_config.items():
+        print(f"  {k}: {v}")
+    
+    model = GPTModel(**model_config)
     
     # Enable memory efficient features
     model = enable_gradient_checkpointing(model)
@@ -82,9 +89,11 @@ def initialize_model(attn_type):
     # Try to load pre-trained weights if available
     try:
         model.load_state_dict(torch.load(f'weights/{attn_type}_model.pt', weights_only=True))
-        return model
+        print(f"Loaded pre-trained weights for {attn_type}")
     except:
-        return model
+        print(f"No pre-trained weights found for {attn_type}, using random initialization")
+    
+    return model
 
 def clear_gpu_memory():
     """Clear GPU memory cache."""
@@ -382,13 +391,20 @@ def compute_model_outputs(model, input_ids, device):
                 logits = outputs[0]
             else:
                 logits = outputs
+                
+            # Ensure logits are the right shape (batch_size, seq_len, vocab_size)
+            if len(logits.shape) != 3:
+                raise ValueError(f"Expected logits shape (batch_size, seq_len, vocab_size), got {logits.shape}")
+                
             # Get predictions
             probs = torch.softmax(logits, dim=-1)
             predictions = torch.argmax(probs, dim=-1)
+            
+            # Move everything to CPU and maintain shapes
             return {
-                'logits': logits.cpu(),
-                'probs': probs.cpu(),
-                'predictions': predictions.cpu()
+                'logits': logits.cpu(),  # Shape: (batch_size, seq_len, vocab_size)
+                'probs': probs.cpu(),    # Shape: (batch_size, seq_len, vocab_size)
+                'predictions': predictions.cpu()  # Shape: (batch_size, seq_len)
             }
         except Exception as e:
             print(f"Error computing outputs: {str(e)}")
@@ -402,55 +418,69 @@ def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-3):  # Increa
             'error': 'One or both outputs are None'
         }
     
-    results = {}
-    
-    # Compare logits
-    logits_diff = torch.abs(outputs1['logits'] - outputs2['logits'])
-    max_logits_diff = logits_diff.max().item()
-    mean_logits_diff = logits_diff.mean().item()
-    std_logits_diff = logits_diff.std().item()
-    
-    # Compare probabilities
-    probs_diff = torch.abs(outputs1['probs'] - outputs2['probs'])
-    max_probs_diff = probs_diff.max().item()
-    mean_probs_diff = probs_diff.mean().item()
-    std_probs_diff = probs_diff.std().item()
-    
-    # Compare top-k predictions (more lenient than exact matches)
-    k = 5
-    top_k1 = torch.topk(outputs1['probs'], k, dim=-1).indices
-    top_k2 = torch.topk(outputs2['probs'], k, dim=-1).indices
-    top_k_overlap = torch.zeros_like(top_k1, dtype=torch.float32)
-    for i in range(k):
-        top_k_overlap += torch.any(top_k1 == top_k2[:, :, i:i+1], dim=-1).float()
-    top_k_match_rate = (top_k_overlap > 0).float().mean().item()
-    
-    # Exact prediction match rate
-    pred_match = (outputs1['predictions'] == outputs2['predictions']).float().mean().item()
-    
-    results = {
-        'match': max_logits_diff < tolerance and max_probs_diff < tolerance,
-        'max_logits_diff': max_logits_diff,
-        'mean_logits_diff': mean_logits_diff,
-        'std_logits_diff': std_logits_diff,
-        'max_probs_diff': max_probs_diff,
-        'mean_probs_diff': mean_probs_diff,
-        'std_probs_diff': std_probs_diff,
-        'top_k_match_rate': top_k_match_rate,
-        'prediction_match_rate': pred_match
-    }
-    
-    # Print comparison results
-    print(f"\nComparing {name1} vs {name2}:")
-    print(f"Maximum logits difference: {max_logits_diff:.6f}")
-    print(f"Mean logits difference: {mean_logits_diff:.6f} (std: {std_logits_diff:.6f})")
-    print(f"Maximum probability difference: {max_probs_diff:.6f}")
-    print(f"Mean probability difference: {mean_probs_diff:.6f} (std: {std_probs_diff:.6f})")
-    print(f"Top-{k} prediction overlap rate: {top_k_match_rate*100:.2f}%")
-    print(f"Exact prediction match rate: {pred_match*100:.2f}%")
-    print(f"Overall match: {'Yes' if results['match'] else 'No'}")
-    
-    return results
+    try:
+        # Verify shapes match
+        if outputs1['logits'].shape != outputs2['logits'].shape:
+            return {
+                'match': False,
+                'error': f"Shape mismatch: {name1} logits {outputs1['logits'].shape} vs {name2} logits {outputs2['logits'].shape}"
+            }
+        
+        results = {}
+        
+        # Compare logits
+        logits_diff = torch.abs(outputs1['logits'] - outputs2['logits'])
+        max_logits_diff = logits_diff.max().item()
+        mean_logits_diff = logits_diff.mean().item()
+        std_logits_diff = logits_diff.std().item()
+        
+        # Compare probabilities
+        probs_diff = torch.abs(outputs1['probs'] - outputs2['probs'])
+        max_probs_diff = probs_diff.max().item()
+        mean_probs_diff = probs_diff.mean().item()
+        std_probs_diff = probs_diff.std().item()
+        
+        # Compare top-k predictions (more lenient than exact matches)
+        k = 5
+        top_k1 = torch.topk(outputs1['probs'], k, dim=-1).indices
+        top_k2 = torch.topk(outputs2['probs'], k, dim=-1).indices
+        top_k_overlap = torch.zeros_like(top_k1, dtype=torch.float32)
+        for i in range(k):
+            top_k_overlap += torch.any(top_k1 == top_k2[:, :, i:i+1], dim=-1).float()
+        top_k_match_rate = (top_k_overlap > 0).float().mean().item()
+        
+        # Exact prediction match rate
+        pred_match = (outputs1['predictions'] == outputs2['predictions']).float().mean().item()
+        
+        results = {
+            'match': max_logits_diff < tolerance and max_probs_diff < tolerance,
+            'max_logits_diff': max_logits_diff,
+            'mean_logits_diff': mean_logits_diff,
+            'std_logits_diff': std_logits_diff,
+            'max_probs_diff': max_probs_diff,
+            'mean_probs_diff': mean_probs_diff,
+            'std_probs_diff': std_probs_diff,
+            'top_k_match_rate': top_k_match_rate,
+            'prediction_match_rate': pred_match
+        }
+        
+        # Print comparison results
+        print(f"\nComparing {name1} vs {name2}:")
+        print(f"Shapes: {name1}={outputs1['logits'].shape}, {name2}={outputs2['logits'].shape}")
+        print(f"Maximum logits difference: {max_logits_diff:.6f}")
+        print(f"Mean logits difference: {mean_logits_diff:.6f} (std: {std_logits_diff:.6f})")
+        print(f"Maximum probability difference: {max_probs_diff:.6f}")
+        print(f"Mean probability difference: {mean_probs_diff:.6f} (std: {std_probs_diff:.6f})")
+        print(f"Top-{k} prediction overlap rate: {top_k_match_rate*100:.2f}%")
+        print(f"Exact prediction match rate: {pred_match*100:.2f}%")
+        print(f"Overall match: {'Yes' if results['match'] else 'No'}")
+        
+        return results
+    except Exception as e:
+        return {
+            'match': False,
+            'error': f"Comparison error: {str(e)}"
+        }
 
 def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
     """Validate that different attention mechanisms produce consistent outputs."""
