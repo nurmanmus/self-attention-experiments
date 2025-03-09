@@ -186,45 +186,66 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
         # For scaled_dot_product_attention, the attention weights are in the second output
         if isinstance(outputs, tuple) and len(outputs) > 1:
             weights = outputs[1]
+            attention_weights.append(weights.detach())
         else:
             # If no attention weights in output, compute them manually
-            q, k, v, mask = inputs
+            if isinstance(inputs, tuple):
+                q, k, v = inputs[0], inputs[1], inputs[2]
+                mask = inputs[3] if len(inputs) > 3 else None
+            else:
+                print(f"Warning: Unexpected inputs type: {type(inputs)}")
+                return
+                
             # Scale dot product
             d_k = q.size(-1)
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
-            # Apply mask
+            
+            # Apply mask if provided
             if mask is not None:
-                scores = scores.masked_fill(~mask, float('-inf'))
+                if isinstance(mask, torch.Tensor):
+                    scores = scores.masked_fill(~mask, float('-inf'))
+                else:
+                    print(f"Warning: Unexpected mask type: {type(mask)}")
+            
             # Get attention weights
             weights = torch.softmax(scores, dim=-1)
-        attention_weights.append(weights.detach())
+            attention_weights.append(weights.detach())
     
     # Register hooks for each attention layer
     hooks = []
     for name, module in model.named_modules():
-        if 'mha' in name.lower():  # This will catch MHA, MQA, and MLA attention modules
+        if any(attn_type in name.lower() for attn_type in ['mha', 'mqa', 'mla']):
+            print(f"Registering hook for {name}: {type(module)}")
             hook = module.register_forward_hook(attention_hook)
             hooks.append(hook)
     
     with torch.no_grad():
-        # Forward pass to get attention weights
-        outputs = model(x)
-        
-        # Remove hooks
-        for hook in hooks:
-            hook.remove()
-        
-        if not attention_weights:
-            print("Warning: No attention weights captured during forward pass")
-            print("Model architecture:")
+        try:
+            # Forward pass to get attention weights
+            outputs = model(x)
+            
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
+            
+            if not attention_weights:
+                print("Warning: No attention weights captured during forward pass")
+                print("\nModel architecture:")
+                for name, module in model.named_modules():
+                    print(f"- {name}: {type(module)}")
+                return None
+                
+            # Verify attention weights format
+            print(f"\nNumber of attention layers: {len(attention_weights)}")
+            for i, layer_weights in enumerate(attention_weights):
+                print(f"Layer {i} attention weights shape: {layer_weights.shape}")
+                
+        except Exception as e:
+            print(f"Error during forward pass: {str(e)}")
+            print("\nModel architecture:")
             for name, module in model.named_modules():
                 print(f"- {name}: {type(module)}")
-            return None
-            
-        # Verify attention weights format
-        print(f"Number of attention layers: {len(attention_weights)}")
-        for i, layer_weights in enumerate(attention_weights):
-            print(f"Layer {i} attention weights shape: {layer_weights.shape}")
+            raise e
     
     # Create directory for figures if it doesn't exist
     os.makedirs("figures", exist_ok=True)
