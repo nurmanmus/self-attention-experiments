@@ -7,6 +7,7 @@ from torch.amp import autocast
 import psutil
 import os
 from transformers import AutoTokenizer
+import seaborn as sns
 
 def load_test_data(tokenizer, sequence_length=512, num_samples=100):
     """Load and prepare test data from WikiText-2 dataset"""
@@ -23,13 +24,15 @@ def load_test_data(tokenizer, sequence_length=512, num_samples=100):
     
     # Create chunks of sequence_length
     chunks = []
+    texts = []  # Store original text for visualization
     for i in range(0, min(len(tokens) - sequence_length, num_samples * sequence_length), sequence_length):
         chunk = tokens[i:i + sequence_length]
-        if len(chunk) == sequence_length:  # Only keep full-length sequences
+        if len(chunk) == sequence_length:
             chunks.append(chunk)
+            # Decode tokens back to text for visualization
+            texts.append(tokenizer.decode(chunk))
     
-    # Stack chunks into a batch
-    return torch.stack(chunks[:num_samples])
+    return torch.stack(chunks[:num_samples]), texts[:num_samples]
 
 def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
     """Measure peak memory usage of the model during forward and backward pass"""
@@ -82,27 +85,92 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), n_run
 def analyze_attention_patterns(model, device, tokenizer, input_size=(1, 512)):
     """Analyze attention patterns for each mechanism"""
     # Load real text data
-    x = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0]).to(device)
+    x, texts = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
+    x = x.to(device)
     
     # Get attention weights
     model.eval()
     with torch.no_grad(), autocast('cuda'):
         _, cache = model(x)
     
-    # Extract attention weights from the last layer
+    # Extract attention weights from all layers
     if hasattr(cache, 'attn_weights'):
-        attn_weights = cache.attn_weights[-1]  # Last layer
+        results = {}
         
-        # Compute statistics
-        sparsity = (attn_weights < 0.01).float().mean().item()
-        entropy = -(attn_weights * torch.log(attn_weights + 1e-10)).sum(-1).mean().item()
+        # Analyze attention patterns across all layers
+        all_layers_weights = cache.attn_weights  # List of attention weights for each layer
         
-        return {
-            'sparsity': sparsity,
-            'entropy': entropy,
-            'max_attention': attn_weights.max().item(),
-            'mean_attention': attn_weights.mean().item()
-        }
+        # 1. Global Statistics
+        avg_attn_weights = torch.stack(all_layers_weights).mean(0)  # Average across layers
+        results.update({
+            'sparsity': (avg_attn_weights < 0.01).float().mean().item(),
+            'entropy': -(avg_attn_weights * torch.log(avg_attn_weights + 1e-10)).sum(-1).mean().item(),
+            'max_attention': avg_attn_weights.max().item(),
+            'mean_attention': avg_attn_weights.mean().item()
+        })
+        
+        # 2. Layer-wise Analysis
+        layer_stats = []
+        for layer_idx, layer_weights in enumerate(all_layers_weights):
+            layer_stats.append({
+                'layer': layer_idx,
+                'sparsity': (layer_weights < 0.01).float().mean().item(),
+                'entropy': -(layer_weights * torch.log(layer_weights + 1e-10)).sum(-1).mean().item(),
+                'attention_concentration': (layer_weights.max(-1)[0]).mean().item()
+            })
+        results['layer_stats'] = layer_stats
+        
+        # 3. Head-wise Analysis
+        head_importances = []
+        for layer_weights in all_layers_weights:
+            # Reshape to [batch, heads, seq, seq]
+            head_weights = layer_weights.view(input_size[0], model.n_heads, input_size[1], input_size[1])
+            # Compute head importance based on attention entropy
+            head_entropy = -(head_weights * torch.log(head_weights + 1e-10)).sum([-2, -1]).mean(0)
+            head_importances.append(head_entropy.cpu().numpy())
+        results['head_importances'] = np.stack(head_importances)
+        
+        # 4. Visualization
+        # Plot attention heatmap for the most important head in the last layer
+        last_layer = all_layers_weights[-1].view(input_size[0], model.n_heads, input_size[1], input_size[1])
+        head_entropy = -(last_layer * torch.log(last_layer + 1e-10)).sum([-2, -1]).mean(0)
+        most_important_head = head_entropy.argmax().item()
+        
+        # Get attention pattern for the most important head
+        attn_pattern = last_layer[0, most_important_head].cpu().numpy()
+        
+        # Create attention heatmap
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(attn_pattern, cmap='viridis')
+        plt.title(f'Attention Pattern (Layer {len(all_layers_weights)-1}, Head {most_important_head})')
+        plt.xlabel('Key Position')
+        plt.ylabel('Query Position')
+        plt.savefig('./figures/attention_pattern.png')
+        plt.close()
+        
+        # Plot head importance heatmap
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(results['head_importances'], cmap='viridis')
+        plt.title('Head Importance Across Layers')
+        plt.xlabel('Head Index')
+        plt.ylabel('Layer')
+        plt.savefig('./figures/head_importance.png')
+        plt.close()
+        
+        # Plot layer-wise statistics
+        metrics = ['sparsity', 'entropy', 'attention_concentration']
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        for idx, metric in enumerate(metrics):
+            values = [stats[metric] for stats in layer_stats]
+            axes[idx].plot(range(len(values)), values, marker='o')
+            axes[idx].set_title(f'Layer-wise {metric.replace("_", " ").title()}')
+            axes[idx].set_xlabel('Layer')
+            axes[idx].set_ylabel(metric.replace('_', ' ').title())
+        plt.tight_layout()
+        plt.savefig('./figures/layer_stats.png')
+        plt.close()
+        
+        return results
     else:
         return None
 
@@ -110,11 +178,24 @@ def plot_comparison(results, metric, title):
     """Plot comparison of different attention mechanisms"""
     plt.figure(figsize=(10, 6))
     models = list(results.keys())
-    values = [results[m][metric] for m in models]
     
-    plt.bar(models, values)
+    if metric in ['layer_stats', 'head_importances']:
+        # Plot layer-wise or head-wise comparisons
+        for model_name in models:
+            if metric == 'layer_stats':
+                values = [stats['entropy'] for stats in results[model_name][metric]]
+                plt.plot(range(len(values)), values, label=model_name, marker='o')
+            else:
+                plt.imshow(results[model_name][metric], aspect='auto')
+                plt.colorbar(label='Importance')
+        plt.legend()
+    else:
+        # Plot simple bar comparison
+        values = [results[m][metric] for m in models]
+        plt.bar(models, values)
+    
     plt.title(title)
-    plt.ylabel(metric)
+    plt.ylabel(metric.replace('_', ' ').title())
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig(f'./figures/{metric.lower().replace(" ", "_")}_comparison.png')
