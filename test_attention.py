@@ -15,24 +15,29 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
         # Get attention weights from the output
         # The output should be (attn_output, kv_cache)
         # We need to compute attention weights from the module's Q and K
-        if hasattr(module, 'wq') and hasattr(module, 'wkv'):
+        if isinstance(module, (RopelessMQA, Rope_MQA)):
             # MQA case
             Q = x @ module.wq.T
             KV = x @ module.wkv
             K, _ = torch.chunk(KV, 2, -1)
             q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
             k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
-        elif hasattr(module, 'W_q') and hasattr(module, 'W_k'):
+        elif isinstance(module, (MHA, Rope_MHA)):
             # MHA case
-            Q = x @ module.W_q.T
-            K = x @ module.W_k.T
+            Q = x @ module.wq.T
+            K = x @ module.wk.T
             q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
             k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, -1).transpose(1, 2)
-        elif hasattr(module, 'W_q') and hasattr(module, 'W_dkv'):
+        elif isinstance(module, (RopelessMLA, MLA)):
             # MLA case
-            Q = x @ module.W_q.T
-            KV = x @ module.W_dkv
-            K = module.kv_layernorm(KV)
+            compressed_q = x @ module.W_dq
+            Q = compressed_q @ module.W_uq
+            compressed_kv = x @ module.W_dkv
+            if hasattr(module, 'W_ukv'):
+                KV = compressed_kv @ module.W_ukv
+                K, _ = torch.chunk(KV, 2, -1)
+            else:
+                K = module.kv_layernorm(compressed_kv)
             q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
             k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
         else:
