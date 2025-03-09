@@ -1,8 +1,8 @@
 import torch
 import matplotlib.pyplot as plt
-from modeling.attention.mha import RopelessMHA, Rope_MHA
+from modeling.attention.mha import MHA, Rope_MHA
 from modeling.attention.mqa import RopelessMQA, Rope_MQA
-from modeling.attention.mla import RopelessMLA, Rope_MLA
+from modeling.attention.mla import MLA, RopelessMLA
 
 def get_attention_patterns(model, seq_len=16, d_model=64):
     """Extract attention patterns from a single forward pass."""
@@ -92,12 +92,12 @@ def main():
     
     # Initialize models
     models = {
-        'MHA': RopelessMHA(d_model, n_heads),
+        'MHA': MHA(d_model, n_heads),
         'MHA_RoPE': Rope_MHA(d_model, n_heads),
         'MQA': RopelessMQA(d_model, n_heads),
         'MQA_RoPE': Rope_MQA(d_model, n_heads),
         'MLA': RopelessMLA(d_model, n_heads),
-        'MLA_RoPE': Rope_MLA(d_model, n_heads)
+        'MLA_RoPE': MLA(d_model, n_heads)
     }
     
     print("Testing attention patterns...")
