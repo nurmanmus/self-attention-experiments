@@ -54,14 +54,22 @@ def initialize_model(attn_type):
     """Initialize model with specified attention type."""
     from modeling.gpt import GPTModel
     
+    # Parse attention type and variant
+    use_mla = attn_type.startswith('mla')
+    use_mqa = attn_type.startswith('mqa')
+    use_rope = 'rope' in attn_type
+    cache_compress = not ('uncompressed' in attn_type)
+    
     model = GPTModel(
         d_model=512,  # More realistic model size
         n_heads=8,    # Standard number of heads
         layers=12,    # Standard number of layers
         vocab_size=50257,  # GPT-2 vocab size
         max_seq_len=2048,  # Increased max sequence length
-        use_mla=attn_type == 'mla',
-        use_mqa=attn_type == 'mqa'
+        use_mla=use_mla,
+        use_mqa=use_mqa,
+        use_rope=use_rope,
+        cache_compress=cache_compress
     )
     
     # Enable memory efficient features
@@ -496,7 +504,17 @@ def evaluate_attention_mechanisms(num_samples=32):
     
     # Initialize models for all attention mechanisms
     models = {}
-    for attn_type in ['mha', 'mqa', 'mla']:
+    attention_types = [
+        'mha',              # Standard Multi-Head Attention
+        'mha_rope',         # Multi-Head Attention with RoPE
+        'mqa',              # Multi-Query Attention
+        'mqa_rope',         # Multi-Query Attention with RoPE
+        'mla',              # Multi-Level Attention (Ropeless, compressed)
+        'mla_rope',         # Multi-Level Attention with RoPE
+        'mla_uncompressed'  # Multi-Level Attention (Ropeless, uncompressed)
+    ]
+    
+    for attn_type in attention_types:
         try:
             print(f"\nInitializing {attn_type.upper()} model...")
             models[attn_type] = initialize_model(attn_type)
