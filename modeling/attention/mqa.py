@@ -72,7 +72,7 @@ class Rope_MQA(torch.nn.Module):
         # Initialize with consistent scale
         std = 0.02
         self.wq = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
-        self.wkv = torch.nn.Parameter(std*torch.randn((d_model, 2 * d_model)))
+        self.wkv = torch.nn.Parameter(std*torch.randn((d_model, 2 * (d_model//n_heads))))
         self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
         # RoPE
@@ -91,8 +91,8 @@ class Rope_MQA(torch.nn.Module):
         # queries, keys, and values
         B, S, D = x.shape
         Q = x @ self.wq.T  # B, S, D
-        KV = x @ self.wkv  # B, S, 2D
-        K, V = torch.chunk(KV, 2, -1)  # Each is B, S, D
+        KV = x @ self.wkv  # B, S, 2*Dh
+        K, V = torch.chunk(KV, 2, -1)  # Each is B, S, Dh
 
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
@@ -104,8 +104,10 @@ class Rope_MQA(torch.nn.Module):
         # split into multiple heads
         # Reshape Q, K, V to head dimensions
         q_heads = Q.view(B, S, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
-        k_heads = K.view(B, -1, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
-        v_heads = V.view(B, -1, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
+        k_heads = K.unsqueeze(2).expand(B, -1, self.n_heads, -1)  # B, S_full, H, Dh
+        v_heads = V.unsqueeze(2).expand(B, -1, self.n_heads, -1)  # B, S_full, H, Dh
+        k_heads = k_heads.transpose(1,2)  # B, H, S_full, Dh
+        v_heads = v_heads.transpose(1,2)  # B, H, S_full, Dh
 
         S_full = k_heads.size(2)        
 
