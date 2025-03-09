@@ -25,11 +25,11 @@ def initialize_model(attn_type):
     from modeling.gpt import GPTModel
     
     model = GPTModel(
-        d_model=32,  # Reduced model size for testing
-        n_heads=8,   # Reduced number of heads
-        layers=4,    # Reduced number of layers
+        d_model=512,  # More realistic model size
+        n_heads=8,    # Standard number of heads
+        layers=12,    # Standard number of layers
         vocab_size=50257,  # GPT-2 vocab size
-        max_seq_len=1024,
+        max_seq_len=2048,  # Increased max sequence length
         use_mla=attn_type == 'mla',
         use_mqa=attn_type == 'mqa'
     )
@@ -41,36 +41,54 @@ def initialize_model(attn_type):
     except:
         return model
 
-def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1) -> Tuple[torch.Tensor, List[str]]:
+def load_test_data(tokenizer, sequence_length: int = 2048, num_samples: int = 1) -> Tuple[torch.Tensor, List[str]]:
     """Load and prepare test data from multiple sources."""
-    # Create figures directory if it doesn't exist
-    os.makedirs("figures", exist_ok=True)
-    
-    # Load datasets
     try:
-        # Load WikiText dataset
+        # Load multiple datasets for more diverse testing
+        datasets = []
+        
+        # Load WikiText-103
         wikitext = load_dataset("wikitext", 
                               "wikitext-103-v1", 
                               split="test",
                               trust_remote_code=True)
+        datasets.append(("wiki", wikitext))
         
-        # Get samples from dataset
+        # Load C4 dataset subset
+        try:
+            c4 = load_dataset("c4", "en", split="validation", streaming=True)
+            c4_samples = list(itertools.islice(c4, 1000))  # Get 1000 samples
+            datasets.append(("c4", c4_samples))
+        except Exception as e:
+            print(f"Error loading C4 dataset: {str(e)}")
+        
+        # Combine samples from all datasets
         text_samples = []
-        for text in wikitext["text"]:
-            if text and isinstance(text, str) and len(text.strip()) > 0:
-                text_samples.append(("wiki", text.strip()))
-                if len(text_samples) >= num_samples:
-                    break
+        for source, dataset in datasets:
+            if isinstance(dataset, list):
+                # For C4 dataset
+                for item in dataset:
+                    if len(text_samples) >= num_samples:
+                        break
+                    if item and 'text' in item and len(item['text'].strip()) > 100:
+                        text_samples.append((source, item['text'].strip()))
+            else:
+                # For WikiText dataset
+                for text in dataset["text"]:
+                    if len(text_samples) >= num_samples:
+                        break
+                    if text and isinstance(text, str) and len(text.strip()) > 100:
+                        text_samples.append((source, text.strip()))
         
-        # If we don't have enough samples, add some random text
+        # If we still don't have enough samples, add some random text
         while len(text_samples) < num_samples:
-            text_samples.append(("random", "Random generated text for testing attention patterns."))
+            text_samples.append(("random", "Random generated text for testing performance metrics." * 100))
         
         # Shuffle and select required number of samples
         random.shuffle(text_samples)
         selected_samples = text_samples[:num_samples]
         
-        # Tokenize and prepare tensors
+        # Tokenize and prepare tensors with longer sequences
         tokenized_texts = []
         source_texts = []
         
@@ -82,12 +100,11 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
                              padding="max_length",
                              return_tensors="pt")
             
-            # Get input_ids and ensure it's 2D
             input_ids = tokens["input_ids"]
-            if len(input_ids.shape) == 3:  # If shape is (batch, seq_len, hidden)
+            if len(input_ids.shape) == 3:
                 input_ids = input_ids.view(-1, sequence_length)
-            elif len(input_ids.shape) == 1:  # If shape is (seq_len,)
-                input_ids = input_ids.unsqueeze(0)  # Add batch dimension
+            elif len(input_ids.shape) == 1:
+                input_ids = input_ids.unsqueeze(0)
                 
             tokenized_texts.append(input_ids)
             source_texts.append((source, text[:100] + "..." if len(text) > 100 else text))
@@ -95,19 +112,17 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
         # Stack tensors
         if tokenized_texts:
             input_tensor = torch.cat(tokenized_texts, dim=0)
-            # Ensure final shape is (batch_size, sequence_length)
             if len(input_tensor.shape) > 2:
                 input_tensor = input_tensor.view(-1, sequence_length)
         else:
-            print("Warning: No valid samples found in the dataset, using random data")
+            print("Warning: No valid samples found in the datasets, using random data")
             input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
             
         return input_tensor, source_texts
         
     except Exception as e:
-        print(f"Error loading dataset: {str(e)}")
+        print(f"Error loading datasets: {str(e)}")
         print("Falling back to random data generation")
-        # Fallback to simple random data if dataset loading fails
         input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
         return input_tensor, [("random", "Random text") for _ in range(num_samples)]
 
@@ -270,7 +285,7 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
     
     return metrics
 
-def evaluate_attention_mechanisms(num_samples=5):
+def evaluate_attention_mechanisms(num_samples=32):  # Increased default samples
     """Evaluate different attention mechanisms."""
     print("Using device:", device)
     
@@ -281,39 +296,42 @@ def evaluate_attention_mechanisms(num_samples=5):
         'kqv_cache_metrics': {}
     }
     
-    # Test parameters
-    sequence_lengths = [128, 256]
-    batch_sizes = [1, 2]
+    # More realistic test parameters
+    sequence_lengths = [512, 1024, 2048]  # Common sequence lengths
+    batch_sizes = [1, 8, 32]  # Various batch sizes for throughput testing
     
     def display_metrics(attn_type, memory_results, speed_results, kqv_metrics):
         """Display performance metrics for the current attention mechanism."""
         print(f"\n{attn_type.upper()} Performance Metrics:")
         
         print("\nMemory Usage (MB):")
-        print("-" * 50)
-        print(f"{'Config':<15} {'Memory (MB)':<10}")
-        print("-" * 50)
+        print("-" * 60)
+        print(f"{'Config':<20} {'Memory (MB)':<15}")
+        print("-" * 60)
         for config, memory in memory_results.items():
-            print(f"{config:<15} {memory:>10.2f}")
+            print(f"{config:<20} {memory:>15.2f}")
         
         print("\nInference Speed (seconds):")
-        print("-" * 50)
-        print(f"{'Config':<15} {'Time (s)':<10}")
-        print("-" * 50)
+        print("-" * 60)
+        print(f"{'Config':<20} {'Time (s)':<15} {'Tokens/sec':>12}")
+        print("-" * 60)
         for config, speed in speed_results.items():
-            print(f"{config:<15} {speed:>10.5f}")
+            batch_size = int(config.split('b')[1].split('_')[0])
+            seq_len = int(config.split('s')[1])
+            tokens_per_sec = (batch_size * seq_len) / speed
+            print(f"{config:<20} {speed:>15.5f} {tokens_per_sec:>12.0f}")
         
         print("\nKQV Cache Metrics:")
-        print("-" * 50)
-        print(f"{'Metric':<20} {'Value'}")
-        print("-" * 50)
+        print("-" * 60)
+        print(f"{'Config':<20} {'Memory (MB)':<12} {'Time (ms)':<10} {'Cache (MB)':<10}")
+        print("-" * 60)
         for config, metrics in kqv_metrics.items():
-            print(f"\nConfig: {config}")
-            print(f"{'Memory (MB)':<20} {metrics['memory']:>10.2f}")
-            print(f"{'Time (s)':<20} {metrics['time']:>10.5f}")
-            print(f"{'Cache Size (MB)':<20} {metrics['cache_size']:>10.2f}")
+            print(f"{config:<20}", end="")
+            print(f"{metrics['memory']:>12.2f}", end="")
+            print(f"{metrics['time']*1000:>10.2f}", end="")  # Convert to ms
+            print(f"{metrics['cache_size']:>10.2f}")
         
-        print("\n" + "="*50)
+        print("\n" + "="*60)
     
     # Evaluate each attention mechanism
     for attn_type in ['mha', 'mqa', 'mla']:
@@ -366,26 +384,26 @@ def evaluate_attention_mechanisms(num_samples=5):
     
     # Display final comparative metrics
     print("\nComparative Performance Summary:")
-    print("=" * 50)
+    print("=" * 60)
     
     print("\nMemory Usage Comparison (MB):")
     print("-" * 70)
-    print(f"{'Config':<15} {'MHA':>10} {'MQA':>10} {'MLA':>10}")
+    print(f"{'Config':<20} {'MHA':>15} {'MQA':>15} {'MLA':>15}")
     print("-" * 70)
     for config in results['memory_usage']['mha'].keys():
-        print(f"{config:<15}", end="")
+        print(f"{config:<20}", end="")
         for attn_type in ['mha', 'mqa', 'mla']:
-            print(f"{results['memory_usage'][attn_type][config]:>10.2f}", end="")
+            print(f"{results['memory_usage'][attn_type][config]:>15.2f}", end="")
         print()
     
     print("\nInference Speed Comparison (seconds):")
     print("-" * 70)
-    print(f"{'Config':<15} {'MHA':>10} {'MQA':>10} {'MLA':>10}")
+    print(f"{'Config':<20} {'MHA':>15} {'MQA':>15} {'MLA':>15}")
     print("-" * 70)
     for config in results['inference_speed']['mha'].keys():
-        print(f"{config:<15}", end="")
+        print(f"{config:<20}", end="")
         for attn_type in ['mha', 'mqa', 'mla']:
-            print(f"{results['inference_speed'][attn_type][config]:>10.5f}", end="")
+            print(f"{results['inference_speed'][attn_type][config]:>15.5f}", end="")
         print()
     
     print("\nKQV Cache Performance Comparison:")
@@ -394,13 +412,13 @@ def evaluate_attention_mechanisms(num_samples=5):
     metrics = ['memory', 'time', 'cache_size']
     for metric in metrics:
         print(f"\n{metric.title()} Usage:")
-        print(f"{'Config':<15} {'MHA':>10} {'MQA':>10} {'MLA':>10}")
+        print(f"{'Config':<20} {'MHA':>15} {'MQA':>15} {'MLA':>15}")
         print("-" * 70)
         for config in results['kqv_cache_metrics']['mha'].keys():
-            print(f"{config:<15}", end="")
+            print(f"{config:<20}", end="")
             for attn_type in ['mha', 'mqa', 'mla']:
                 value = results['kqv_cache_metrics'][attn_type][config][metric]
-                print(f"{value:>10.2f}", end="")
+                print(f"{value:>15.2f}", end="")
             print()
     
     return results
@@ -415,6 +433,6 @@ if __name__ == "__main__":
     
     # Run evaluation
     try:
-        results = evaluate_attention_mechanisms(num_samples=5)
+        results = evaluate_attention_mechanisms(num_samples=32)
     except Exception as e:
         print(f"Error during evaluation: {str(e)}") 
