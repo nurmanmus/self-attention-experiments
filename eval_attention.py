@@ -24,9 +24,9 @@ def initialize_model(attn_type):
     from modeling.gpt import GPTModel
     
     model = GPTModel(
-        d_model=512,
-        n_heads=16,
-        layers=8,
+        d_model=32,  # Reduced model size for testing
+        n_heads=8,   # Reduced number of heads
+        layers=4,    # Reduced number of layers
         vocab_size=50257,  # GPT-2 vocab size
         max_seq_len=1024,
         use_mla=attn_type == 'mla',
@@ -124,7 +124,11 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
         x = x.view(batch_size, -1)
     
     with torch.no_grad():
-        _ = model(x)
+        outputs = model(x)
+        if isinstance(outputs, tuple):
+            logits = outputs[0]
+        else:
+            logits = outputs
     
     final_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
     memory_used = (final_memory - initial_memory) / 1024 / 1024  # Convert to MB
@@ -143,13 +147,21 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_r
     # Warmup
     with torch.no_grad():
         for _ in range(10):
-            _ = model(x)
+            outputs = model(x)
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            else:
+                logits = outputs
     
     # Measure time
     start_time = time.time()
     with torch.no_grad():
         for _ in range(num_runs):
-            _ = model(x)
+            outputs = model(x)
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            else:
+                logits = outputs
     end_time = time.time()
     
     avg_time = (end_time - start_time) / num_runs
@@ -169,9 +181,19 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     with torch.no_grad():
         # Get attention weights from the model's forward pass
         outputs = model(x)
-        # Assuming the model returns attention weights as part of its output
+        # Model returns (logits, kv_cache)
         if isinstance(outputs, tuple) and len(outputs) > 1:
-            attention_weights = outputs[1]  # Second element should be attention weights
+            logits, kv_cache = outputs
+            # Extract attention weights from kv_cache
+            attention_weights = []
+            for layer_cache in kv_cache:
+                if isinstance(layer_cache, tuple):
+                    # Assuming layer_cache is (key, value) or (key, value, attention)
+                    if len(layer_cache) > 2:
+                        attention_weights.append(layer_cache[2])  # Get attention weights
+            if not attention_weights:
+                print("Warning: No attention weights found in model outputs")
+                return None
         else:
             print("Warning: Model did not return attention weights, skipping attention analysis")
             return None
@@ -185,7 +207,12 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
         
         # Plot attention patterns for each layer
         for layer_idx, layer_attention in enumerate(attention_weights):
-            layer_weights = layer_attention[sample_idx].cpu()
+            # Ensure layer_attention is the right shape (batch, heads, seq, seq)
+            if len(layer_attention.shape) == 4:
+                layer_weights = layer_attention[sample_idx].cpu()
+            else:
+                print(f"Warning: Unexpected attention weight shape: {layer_attention.shape}")
+                continue
             
             # Create heatmap
             plt.figure(figsize=(12, 8))
