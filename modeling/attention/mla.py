@@ -23,18 +23,21 @@ class RopelessMLA_Uncompressed(torch.nn.Module):
         self.kv_proj_dim = (2*d_model) // 3
         self.dh = d_model // n_heads
 
+        # Initialize with consistent scale
+        std = 0.02
+        
         # Q projections
-        self.W_dq = torch.nn.Parameter(0.01*torch.randn((d_model, self.q_proj_dim)))
-        self.W_uq = torch.nn.Parameter(0.01*torch.randn((self.q_proj_dim, d_model)))
+        self.W_dq = torch.nn.Parameter(std*torch.randn((d_model, self.q_proj_dim)))
+        self.W_uq = torch.nn.Parameter(std*torch.randn((self.q_proj_dim, d_model)))
         self.q_layernorm = torch.nn.LayerNorm(self.q_proj_dim)
 
         # KV projections
-        self.W_dkv = torch.nn.Parameter(0.01*torch.randn((d_model, self.kv_proj_dim)))
-        self.W_ukv = torch.nn.Parameter(0.01*torch.randn((self.kv_proj_dim, 2*self.d_model)))
+        self.W_dkv = torch.nn.Parameter(std*torch.randn((d_model, self.kv_proj_dim)))
+        self.W_ukv = torch.nn.Parameter(std*torch.randn((self.kv_proj_dim, 2*self.d_model)))
         self.kv_layernorm = torch.nn.LayerNorm(self.kv_proj_dim)
 
         # output projection
-        self.W_o = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        self.W_o = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         # queries, keys, and values
@@ -93,18 +96,21 @@ class RopelessMLA(torch.nn.Module):
         self.kv_proj_dim = (2*d_model) // 3
         self.dh = d_model // n_heads
         
+        # Initialize with consistent scale
+        std = 0.02
+        
         # Q projections
-        self.W_dq = torch.nn.Parameter(0.01*torch.randn((d_model, self.q_proj_dim)))
-        self.W_uq = torch.nn.Parameter(0.01*torch.randn((self.q_proj_dim, d_model)))
+        self.W_dq = torch.nn.Parameter(std*torch.randn((d_model, self.q_proj_dim)))
+        self.W_uq = torch.nn.Parameter(std*torch.randn((self.q_proj_dim, d_model)))
         self.q_layernorm = torch.nn.LayerNorm(self.q_proj_dim)
         
         # KV projections
-        self.W_dkv = torch.nn.Parameter(0.01*torch.randn((d_model, self.kv_proj_dim)))
-        self.W_ukv = torch.nn.Parameter(0.01*torch.randn((self.kv_proj_dim, 2*self.d_model)))
+        self.W_dkv = torch.nn.Parameter(std*torch.randn((d_model, self.kv_proj_dim)))
+        self.W_ukv = torch.nn.Parameter(std*torch.randn((self.kv_proj_dim, 2*self.d_model)))
         self.kv_layernorm = torch.nn.LayerNorm(self.kv_proj_dim)
         
         # output projection
-        self.W_o = torch.nn.Parameter(0.01*torch.randn((d_model, d_model)))
+        self.W_o = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
     def forward(self, x, kv_cache=None, past_length=0):
         B, S, D = x.size()
@@ -159,8 +165,8 @@ class MLA(torch.nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.dh = d_model // n_heads
-        self.q_proj_dim = d_model // 2
-        self.kv_proj_dim = (2*d_model) // 3
+        self.q_proj_dim = d_model  # Use full dimension
+        self.kv_proj_dim = d_model  # Use full dimension
         
         # Initialize with consistent scale
         std = 0.02
@@ -197,7 +203,7 @@ class MLA(torch.nn.Module):
         compressed_q = x @ self.W_dq
         compressed_q = self.q_layernorm(compressed_q)
         Q = compressed_q @ self.W_uq
-        Q = Q.view(B, -1, self.n_heads, self.dh).transpose(1,2)
+        q_heads = Q.view(B, -1, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
 
         # KV Projections
         if kv_cache is None:
@@ -221,7 +227,7 @@ class MLA(torch.nn.Module):
         # Apply RoPE
         cos = self.cos_cached[:, :, past_length:past_length+S, :self.dh//2].repeat(1, 1, 1, 2)
         sin = self.sin_cached[:, :, past_length:past_length+S, :self.dh//2].repeat(1, 1, 1, 2)
-        q_heads, k_heads = apply_rope(Q, k_heads, cos, sin)
+        q_heads, k_heads = apply_rope(q_heads, k_heads, cos, sin)  # Use q_heads instead of Q
 
         # make attention mask
         mask = torch.ones((S,S_full), device=x.device)

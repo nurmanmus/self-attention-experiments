@@ -72,31 +72,27 @@ class Rope_MQA(torch.nn.Module):
         # Initialize with consistent scale
         std = 0.02
         self.wq = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
-        self.wkv = torch.nn.Parameter(std*torch.randn((d_model, 2 * self.dh)))
+        self.wkv = torch.nn.Parameter(std*torch.randn((d_model, 2 * d_model)))
         self.wo = torch.nn.Parameter(std*torch.randn((d_model, d_model)))
 
         # RoPE
         self.max_seq_len = max_len
         self.rope_theta = rope_theta
 
-        # https://github.com/lucidrains/rotary-embedding-torch/tree/main
-        # visualize emb later to make sure it looks ok
         freqs = 1.0 / (rope_theta ** (torch.arange(0, self.dh, 2).float() / self.dh))
         emb = torch.outer(torch.arange(self.max_seq_len).float(), freqs)
         cos_cached = emb.cos()[None, None, :, :]
         sin_cached = emb.sin()[None, None, :, :]
 
-        # https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_buffer
-        # This is like a parameter but its a constant so we can use register_buffer
         self.register_buffer("cos_cached", cos_cached)
         self.register_buffer("sin_cached", sin_cached)
 
     def forward(self, x, kv_cache=None, past_length=0):
         # queries, keys, and values
         B, S, D = x.shape
-        Q = x @ self.wq.T # B, S, D
-        KV = x @ self.wkv # B, S, 2*Dh
-        K, V = torch.chunk(KV, 2, -1)
+        Q = x @ self.wq.T  # B, S, D
+        KV = x @ self.wkv  # B, S, 2D
+        K, V = torch.chunk(KV, 2, -1)  # Each is B, S, D
 
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
@@ -106,11 +102,10 @@ class Rope_MQA(torch.nn.Module):
         updated_kv_cache = (K, V)        
         
         # split into multiple heads
-        K_expand = K.unsqueeze(2).expand(B, -1, self.n_heads, -1)
-        V_expand = V.unsqueeze(2).expand(B, -1, self.n_heads, -1)
-        q_heads = Q.view(B, S, self.n_heads, self.dh).transpose(1,2)
-        k_heads = K_expand.view(B, -1, self.n_heads, self.dh).transpose(1,2)
-        v_heads = V_expand.view(B, -1, self.n_heads, self.dh).transpose(1,2)
+        # Reshape Q, K, V to head dimensions
+        q_heads = Q.view(B, S, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
+        k_heads = K.view(B, -1, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
+        v_heads = V.view(B, -1, self.n_heads, self.dh).transpose(1,2)  # B, H, S, Dh
 
         S_full = k_heads.size(2)        
 
