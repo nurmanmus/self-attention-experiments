@@ -286,19 +286,30 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
             elif hasattr(module, 'W_dq') and hasattr(module, 'W_dkv'):
                 # For MLA
                 B, S, D = inputs[0].shape
-                compressed_kv = inputs[0] @ module.W_dkv
-                KV_for_lora, K_for_rope = torch.split(compressed_kv,
-                                                     [module.kv_proj_dim, module.qk_rope_dim],
-                                                     dim=-1)
-                KV_for_lora = module.kv_layernorm(KV_for_lora)
-                KV = KV_for_lora @ module.W_ukv
-                KV = KV.view(B, -1, module.n_heads, module.dh+module.qk_nope_dim).transpose(1,2)
-                K, V = torch.split(KV, [module.qk_nope_dim, module.dh], dim=-1)
                 
-                # Include RoPE part in cache size calculation
-                K_for_rope = K_for_rope.view(B, -1, 1, module.qk_rope_dim).transpose(1,2)
-                K_for_rope = K_for_rope.repeat(1, module.n_heads, 1, 1)
-                cache_size = (K.numel() + K_for_rope.numel() + V.numel())
+                # Check if this is RoPE or Ropeless variant
+                if hasattr(module, 'qk_rope_dim'):
+                    # RoPE MLA
+                    compressed_kv = inputs[0] @ module.W_dkv
+                    KV_for_lora, K_for_rope = torch.split(compressed_kv,
+                                                         [module.kv_proj_dim, module.qk_rope_dim],
+                                                         dim=-1)
+                    KV_for_lora = module.kv_layernorm(KV_for_lora)
+                    KV = KV_for_lora @ module.W_ukv
+                    KV = KV.view(B, -1, module.n_heads, module.dh+module.qk_nope_dim).transpose(1,2)
+                    K, V = torch.split(KV, [module.qk_nope_dim, module.dh], dim=-1)
+                    
+                    # Include RoPE part in cache size calculation
+                    K_for_rope = K_for_rope.view(B, -1, 1, module.qk_rope_dim).transpose(1,2)
+                    K_for_rope = K_for_rope.repeat(1, module.n_heads, 1, 1)
+                    cache_size = (K.numel() + K_for_rope.numel() + V.numel())
+                else:
+                    # Ropeless MLA
+                    compressed_kv = inputs[0] @ module.W_dkv
+                    compressed_kv = module.kv_layernorm(compressed_kv)
+                    KV = compressed_kv @ module.W_ukv
+                    K, V = torch.split(KV, module.d_model, dim=-1)
+                    cache_size = K.numel() + V.numel()
             
             # End timing
             end_time = time.time()
