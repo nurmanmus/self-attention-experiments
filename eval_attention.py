@@ -444,7 +444,13 @@ def display_all_figures():
     if not figure_files:
         print("No figures found in the figures directory.")
         return
-        
+    
+    # Try to configure matplotlib for notebook display
+    try:
+        get_ipython().run_line_magic('matplotlib', 'inline')
+    except:
+        print("Not running in IPython/Jupyter environment. Figures will be saved to files.")
+    
     # Group figures by type
     grouped_figures = {}
     for filename in figure_files:
@@ -464,29 +470,58 @@ def display_all_figures():
     for group, files in grouped_figures.items():
         print(f"\n{group}:")
         
-        # Calculate grid dimensions
-        n_files = len(files)
-        n_cols = min(3, n_files)  # Maximum 3 columns
-        n_rows = (n_files + n_cols - 1) // n_cols  # Ceiling division
-        
-        # Create a figure with subplots
-        fig = plt.figure(figsize=(6*n_cols, 4*n_rows))
-        
-        for idx, filename in enumerate(files, 1):
-            file_path = os.path.join("figures", filename)
-            file_size = os.path.getsize(file_path) / 1024  # KB
-            print(f"- {filename} ({file_size:.1f} KB)")
+        try:
+            # Calculate grid dimensions
+            n_files = len(files)
+            n_cols = min(3, n_files)  # Maximum 3 columns
+            n_rows = (n_files + n_cols - 1) // n_cols  # Ceiling division
             
-            # Add subplot
-            plt.subplot(n_rows, n_cols, idx)
-            img = plt.imread(file_path)
-            plt.imshow(img)
-            plt.axis('off')
-            plt.title(os.path.splitext(filename)[0], fontsize=8, pad=2)
-        
-        plt.tight_layout()
-        plt.show()
-        plt.close()
+            # Create a figure with subplots
+            fig = plt.figure(figsize=(6*n_cols, 4*n_rows))
+            
+            for idx, filename in enumerate(files, 1):
+                file_path = os.path.join("figures", filename)
+                file_size = os.path.getsize(file_path) / 1024  # KB
+                print(f"- {filename} ({file_size:.1f} KB)")
+                
+                # Add subplot
+                ax = plt.subplot(n_rows, n_cols, idx)
+                img = plt.imread(file_path)
+                ax.imshow(img)
+                ax.axis('off')
+                ax.set_title(os.path.splitext(filename)[0], fontsize=8, pad=2)
+            
+            plt.tight_layout()
+            
+            # Try to display in notebook, fall back to saving if not possible
+            try:
+                from IPython.display import display
+                display(plt.gcf())
+            except:
+                save_path = os.path.join("figures", f"{group.lower().replace(' ', '_')}_grid.png")
+                plt.savefig(save_path, bbox_inches='tight', dpi=150)
+                print(f"Grid saved to: {save_path}")
+            
+            plt.close()
+            
+        except Exception as e:
+            print(f"Error displaying {group}: {str(e)}")
+            # If grid display fails, show individual files
+            for filename in files:
+                file_path = os.path.join("figures", filename)
+                file_size = os.path.getsize(file_path) / 1024  # KB
+                print(f"- {filename} ({file_size:.1f} KB)")
+                try:
+                    plt.figure(figsize=(12, 8))
+                    img = plt.imread(file_path)
+                    plt.imshow(img)
+                    plt.axis('off')
+                    plt.title(os.path.splitext(filename)[0], fontsize=8, pad=2)
+                    plt.show()
+                    plt.close()
+                except Exception as e:
+                    print(f"  Error displaying {filename}: {str(e)}")
+                    continue
 
 if __name__ == "__main__":
     print("Using device:", device)
