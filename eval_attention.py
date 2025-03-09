@@ -445,11 +445,21 @@ def display_all_figures():
         print("No figures found in the figures directory.")
         return
     
-    # Try to configure matplotlib for notebook display
+    # Check if running in Colab
     try:
-        get_ipython().run_line_magic('matplotlib', 'inline')
+        from google.colab import output
+        IN_COLAB = True
     except:
-        print("Not running in IPython/Jupyter environment. Figures will be saved to files.")
+        IN_COLAB = False
+    
+    # Import display tools
+    try:
+        from IPython.display import display, Image, HTML
+        import base64
+        from io import BytesIO
+    except ImportError:
+        print("Could not import IPython display modules")
+        return
     
     # Group figures by type
     grouped_figures = {}
@@ -476,51 +486,46 @@ def display_all_figures():
             n_cols = min(3, n_files)  # Maximum 3 columns
             n_rows = (n_files + n_cols - 1) // n_cols  # Ceiling division
             
-            # Create a figure with subplots
-            fig = plt.figure(figsize=(6*n_cols, 4*n_rows))
+            # Create HTML for displaying images in a grid
+            html = ['<div style="display: grid; grid-template-columns: repeat({}, 1fr); gap: 10px;">'.format(n_cols)]
             
-            for idx, filename in enumerate(files, 1):
-                file_path = os.path.join("figures", filename)
-                file_size = os.path.getsize(file_path) / 1024  # KB
-                print(f"- {filename} ({file_size:.1f} KB)")
-                
-                # Add subplot
-                ax = plt.subplot(n_rows, n_cols, idx)
-                img = plt.imread(file_path)
-                ax.imshow(img)
-                ax.axis('off')
-                ax.set_title(os.path.splitext(filename)[0], fontsize=8, pad=2)
-            
-            plt.tight_layout()
-            
-            # Try to display in notebook, fall back to saving if not possible
-            try:
-                from IPython.display import display
-                display(plt.gcf())
-            except:
-                save_path = os.path.join("figures", f"{group.lower().replace(' ', '_')}_grid.png")
-                plt.savefig(save_path, bbox_inches='tight', dpi=150)
-                print(f"Grid saved to: {save_path}")
-            
-            plt.close()
-            
-        except Exception as e:
-            print(f"Error displaying {group}: {str(e)}")
-            # If grid display fails, show individual files
             for filename in files:
                 file_path = os.path.join("figures", filename)
                 file_size = os.path.getsize(file_path) / 1024  # KB
                 print(f"- {filename} ({file_size:.1f} KB)")
+                
+                # Read image and convert to base64
+                with open(file_path, 'rb') as f:
+                    img_data = f.read()
+                img_b64 = base64.b64encode(img_data).decode()
+                
+                # Add image to HTML with title
+                title = os.path.splitext(filename)[0]
+                html.append(f'''
+                    <div style="text-align: center;">
+                        <img src="data:image/png;base64,{img_b64}" style="max-width: 100%; height: auto;">
+                        <p style="font-size: 12px; margin-top: 5px;">{title}</p>
+                    </div>
+                ''')
+            
+            html.append('</div>')
+            
+            # Display the grid
+            if IN_COLAB:
+                output.clear()  # Clear any previous output
+            display(HTML(''.join(html)))
+            
+        except Exception as e:
+            print(f"Error displaying {group}: {str(e)}")
+            print("Falling back to individual image display...")
+            
+            # Fallback to individual image display
+            for filename in files:
+                file_path = os.path.join("figures", filename)
                 try:
-                    plt.figure(figsize=(12, 8))
-                    img = plt.imread(file_path)
-                    plt.imshow(img)
-                    plt.axis('off')
-                    plt.title(os.path.splitext(filename)[0], fontsize=8, pad=2)
-                    plt.show()
-                    plt.close()
+                    display(Image(filename=file_path))
                 except Exception as e:
-                    print(f"  Error displaying {filename}: {str(e)}")
+                    print(f"Error displaying {filename}: {str(e)}")
                     continue
 
 if __name__ == "__main__":
