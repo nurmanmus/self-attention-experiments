@@ -347,6 +347,108 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     
     return attention_weights
 
+def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512), num_runs=10):
+    """Measure performance metrics for KQV cache computation."""
+    x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
+    x = x.to(device)
+    
+    # Ensure input is 2D (batch_size, sequence_length)
+    if len(x.shape) > 2:
+        batch_size = x.size(0)
+        x = x.view(batch_size, -1)
+    
+    # Dictionary to store performance metrics
+    metrics = {
+        'memory': 0,
+        'time': 0,
+        'cache_size': 0
+    }
+    
+    def measure_kqv_hook(module, inputs, outputs):
+        try:
+            # Measure memory before computation
+            torch.cuda.empty_cache()
+            start_mem = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+            
+            # Start timing
+            start_time = time.time()
+            
+            # Compute KQV based on attention type
+            if hasattr(module, 'qkv'):
+                # For MHA
+                B, S, D = inputs[0].shape
+                QKV = inputs[0] @ module.qkv.T
+                Q, K, V = torch.chunk(QKV, 3, -1)
+                cache_size = K.numel() + V.numel()
+                
+            elif hasattr(module, 'wq') and hasattr(module, 'wkv'):
+                # For MQA
+                B, S, D = inputs[0].shape
+                Q = inputs[0] @ module.wq.T
+                KV = inputs[0] @ module.wkv
+                K, V = torch.chunk(KV, 2, -1)
+                cache_size = K.numel() + V.numel()
+                
+            elif hasattr(module, 'W_dq') and hasattr(module, 'W_dkv'):
+                # For MLA
+                B, S, D = inputs[0].shape
+                compressed_kv = inputs[0] @ module.W_dkv
+                compressed_kv = module.kv_layernorm(compressed_kv)
+                KV = compressed_kv @ module.W_ukv
+                K, V = torch.split(KV, module.d_model, dim=-1)
+                cache_size = K.numel() + V.numel()
+            
+            # End timing
+            end_time = time.time()
+            
+            # Measure memory after computation
+            end_mem = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+            
+            # Update metrics
+            metrics['memory'] += (end_mem - start_mem) / 1024 / 1024  # Convert to MB
+            metrics['time'] += end_time - start_time
+            metrics['cache_size'] = cache_size * 4 / 1024 / 1024  # Convert to MB (assuming float32)
+            
+        except Exception as e:
+            print(f"Error in KQV measurement hook: {str(e)}")
+    
+    # Register hooks for each attention layer
+    hooks = []
+    for name, module in model.named_modules():
+        if name.endswith('.mha') and isinstance(module, (
+            model.layers[0].mha.__class__,
+        )):
+            hook = module.register_forward_hook(measure_kqv_hook)
+            hooks.append(hook)
+    
+    # Warmup
+    with torch.no_grad():
+        for _ in range(5):
+            outputs = model(x)
+    
+    # Reset metrics after warmup
+    metrics = {
+        'memory': 0,
+        'time': 0,
+        'cache_size': 0
+    }
+    
+    # Measure over multiple runs
+    with torch.no_grad():
+        for _ in range(num_runs):
+            outputs = model(x)
+    
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+    
+    # Average the metrics
+    num_layers = len(model.layers)
+    metrics['memory'] /= (num_runs * num_layers)
+    metrics['time'] /= (num_runs * num_layers)
+    
+    return metrics
+
 def evaluate_attention_mechanisms(num_samples=5):
     """Evaluate different attention mechanisms."""
     print("Using device:", device)
@@ -355,16 +457,18 @@ def evaluate_attention_mechanisms(num_samples=5):
     results = {
         'memory_usage': {},
         'inference_speed': {},
-        'attention_patterns': {}
+        'attention_patterns': {},
+        'kqv_cache_metrics': {}  # New field for KQV cache metrics
     }
     
-    # Test parameters - reduced sizes for testing
-    sequence_lengths = [128, 256]  # Reduced from [512, 1024]
-    batch_sizes = [1, 2]  # Reduced from [1, 4, 16]
+    # Test parameters
+    sequence_lengths = [128, 256]
+    batch_sizes = [1, 2]
     
-    def display_metrics(attn_type, memory_results, speed_results):
+    def display_metrics(attn_type, memory_results, speed_results, kqv_metrics):
         """Display performance metrics for the current attention mechanism."""
         print(f"\n{attn_type.upper()} Performance Metrics:")
+        
         print("\nMemory Usage (MB):")
         print("-" * 50)
         print(f"{'Config':<15} {'Memory (MB)':<10}")
@@ -378,6 +482,17 @@ def evaluate_attention_mechanisms(num_samples=5):
         print("-" * 50)
         for config, speed in speed_results.items():
             print(f"{config:<15} {speed:>10.5f}")
+        
+        print("\nKQV Cache Metrics:")
+        print("-" * 50)
+        print(f"{'Metric':<20} {'Value'}")
+        print("-" * 50)
+        for config, metrics in kqv_metrics.items():
+            print(f"\nConfig: {config}")
+            print(f"{'Memory (MB)':<20} {metrics['memory']:>10.2f}")
+            print(f"{'Time (s)':<20} {metrics['time']:>10.5f}")
+            print(f"{'Cache Size (MB)':<20} {metrics['cache_size']:>10.2f}")
+        
         print("\n" + "="*50)
     
     # Evaluate each attention mechanism
@@ -401,28 +516,38 @@ def evaluate_attention_mechanisms(num_samples=5):
                 memory_results[f'b{batch_size}_s{seq_len}'] = memory_used
         results['memory_usage'][attn_type] = memory_results
         
-        # Inference speed - reduced number of runs
+        # Inference speed
         print("Measuring inference speed...")
         speed_results = {}
         for seq_len in sequence_lengths:
             for batch_size in batch_sizes:
                 avg_time = measure_inference_speed(model, device, tokenizer,
                                                 input_size=(batch_size, seq_len),
-                                                num_runs=10)  # Reduced from 100
+                                                num_runs=10)
                 speed_results[f'b{batch_size}_s{seq_len}'] = avg_time
         results['inference_speed'][attn_type] = speed_results
         
-        # Display current metrics
-        display_metrics(attn_type, memory_results, speed_results)
+        # KQV cache performance
+        print("Measuring KQV cache performance...")
+        kqv_metrics = {}
+        for seq_len in sequence_lengths:
+            for batch_size in batch_sizes:
+                metrics = measure_kqv_cache_performance(model, device, tokenizer,
+                                                     input_size=(batch_size, seq_len))
+                kqv_metrics[f'b{batch_size}_s{seq_len}'] = metrics
+        results['kqv_cache_metrics'][attn_type] = kqv_metrics
         
-        # Attention patterns - reduced sequence length and samples
+        # Display current metrics
+        display_metrics(attn_type, memory_results, speed_results, kqv_metrics)
+        
+        # Attention patterns
         print("Analyzing attention patterns...")
         attention_weights = analyze_attention_patterns(model, device, tokenizer,
-                                                    sequence_length=256,  # Reduced from 1024
-                                                    num_samples=2)  # Reduced from 5
+                                                    sequence_length=256,
+                                                    num_samples=2)
         results['attention_patterns'][attn_type] = attention_weights
         
-        # Clear GPU memory after each model
+        # Clear GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
@@ -449,6 +574,21 @@ def evaluate_attention_mechanisms(num_samples=5):
         for attn_type in ['mha', 'mqa', 'mla']:
             print(f"{results['inference_speed'][attn_type][config]:>10.5f}", end="")
         print()
+    
+    print("\nKQV Cache Performance Comparison:")
+    print("-" * 70)
+    print("Average per layer:")
+    metrics = ['memory', 'time', 'cache_size']
+    for metric in metrics:
+        print(f"\n{metric.title()} Usage:")
+        print(f"{'Config':<15} {'MHA':>10} {'MQA':>10} {'MLA':>10}")
+        print("-" * 70)
+        for config in results['kqv_cache_metrics']['mha'].keys():
+            print(f"{config:<15}", end="")
+            for attn_type in ['mha', 'mqa', 'mla']:
+                value = results['kqv_cache_metrics'][attn_type][config][metric]
+                print(f"{value:>10.2f}", end="")
+            print()
     
     return results
 
