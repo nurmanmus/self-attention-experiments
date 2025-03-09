@@ -445,18 +445,10 @@ def display_all_figures():
         print("No figures found in the figures directory.")
         return
     
-    # Check if running in Colab
-    try:
-        from google.colab import output
-        IN_COLAB = True
-    except:
-        IN_COLAB = False
-    
     # Import display tools
     try:
-        from IPython.display import display, Image, HTML
-        import base64
-        from io import BytesIO
+        from IPython.display import display, Image
+        from matplotlib import pyplot as plt
     except ImportError:
         print("Could not import IPython display modules")
         return
@@ -486,44 +478,38 @@ def display_all_figures():
             n_cols = min(3, n_files)  # Maximum 3 columns
             n_rows = (n_files + n_cols - 1) // n_cols  # Ceiling division
             
-            # Create HTML for displaying images in a grid
-            html = ['<div style="display: grid; grid-template-columns: repeat({}, 1fr); gap: 10px;">'.format(n_cols)]
+            # Create a figure with subplots
+            plt.figure(figsize=(8*n_cols, 6*n_rows))
             
-            for filename in files:
+            for idx, filename in enumerate(files, 1):
                 file_path = os.path.join("figures", filename)
                 file_size = os.path.getsize(file_path) / 1024  # KB
                 print(f"- {filename} ({file_size:.1f} KB)")
                 
-                # Read image and convert to base64
-                with open(file_path, 'rb') as f:
-                    img_data = f.read()
-                img_b64 = base64.b64encode(img_data).decode()
-                
-                # Add image to HTML with title
-                title = os.path.splitext(filename)[0]
-                html.append(f'''
-                    <div style="text-align: center;">
-                        <img src="data:image/png;base64,{img_b64}" style="max-width: 100%; height: auto;">
-                        <p style="font-size: 12px; margin-top: 5px;">{title}</p>
-                    </div>
-                ''')
+                # Add subplot
+                plt.subplot(n_rows, n_cols, idx)
+                img = plt.imread(file_path)
+                plt.imshow(img)
+                plt.axis('off')
+                plt.title(os.path.splitext(filename)[0], fontsize=8, pad=2)
             
-            html.append('</div>')
-            
-            # Display the grid
-            if IN_COLAB:
-                output.clear()  # Clear any previous output
-            display(HTML(''.join(html)))
+            plt.tight_layout(pad=3.0)
+            plt.show()
+            plt.close()
             
         except Exception as e:
             print(f"Error displaying {group}: {str(e)}")
-            print("Falling back to individual image display...")
-            
             # Fallback to individual image display
             for filename in files:
                 file_path = os.path.join("figures", filename)
                 try:
-                    display(Image(filename=file_path))
+                    img = plt.imread(file_path)
+                    plt.figure(figsize=(12, 8))
+                    plt.imshow(img)
+                    plt.axis('off')
+                    plt.title(os.path.splitext(filename)[0])
+                    plt.show()
+                    plt.close()
                 except Exception as e:
                     print(f"Error displaying {filename}: {str(e)}")
                     continue
