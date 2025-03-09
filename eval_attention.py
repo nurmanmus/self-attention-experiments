@@ -420,7 +420,6 @@ def compute_model_outputs(model, input_ids, device):
         
         with torch.no_grad():
             try:
-                # Use regular autocast instead of deprecated cuda.amp.autocast
                 with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                     print("Computing model outputs...")
                     outputs = model(input_ids)
@@ -440,21 +439,34 @@ def compute_model_outputs(model, input_ids, device):
                     
                     # Get predictions
                     print("Computing probabilities...")
-                    probs = torch.softmax(logits, dim=-1)
+                    # Move to CPU first to avoid potential GPU memory issues
+                    logits_cpu = logits.cpu().to(torch.float32)
+                    probs = torch.softmax(logits_cpu, dim=-1)
                     print(f"Probabilities shape: {probs.shape}")
                     
                     print("Computing predictions...")
                     predictions = torch.argmax(probs, dim=-1)
                     print(f"Predictions shape: {predictions.shape}")
                     
-                    # Move everything to CPU and maintain shapes
+                    # Ensure all outputs have consistent shapes
+                    batch_size, seq_len, vocab_size = logits_cpu.shape
+                    
+                    # Verify and reshape if needed
+                    if probs.shape != (batch_size, seq_len, vocab_size):
+                        print(f"Warning: Reshaping probs from {probs.shape} to {(batch_size, seq_len, vocab_size)}")
+                        probs = probs.view(batch_size, seq_len, vocab_size)
+                    
+                    if predictions.shape != (batch_size, seq_len):
+                        print(f"Warning: Reshaping predictions from {predictions.shape} to {(batch_size, seq_len)}")
+                        predictions = predictions.view(batch_size, seq_len)
+                    
                     outputs_dict = {
-                        'logits': logits.cpu().to(torch.float32),      # Shape: (batch_size, seq_len, vocab_size)
-                        'probs': probs.cpu().to(torch.float32),        # Shape: (batch_size, seq_len, vocab_size)
-                        'predictions': predictions.cpu()                # Shape: (batch_size, seq_len)
+                        'logits': logits_cpu,
+                        'probs': probs,
+                        'predictions': predictions
                     }
                     
-                    # Verify shapes are consistent
+                    # Final shape verification
                     print("\nVerifying output shapes:")
                     print(f"  logits: {outputs_dict['logits'].shape}")
                     print(f"  probs: {outputs_dict['probs'].shape}")
@@ -474,7 +486,7 @@ def compute_model_outputs(model, input_ids, device):
         print(f"Error in compute_model_outputs: {str(e)}")
         return None
 
-def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-3):  # Increased tolerance
+def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-3):
     """Compare outputs between two models and return detailed metrics."""
     if outputs1 is None or outputs2 is None:
         return {
@@ -483,64 +495,88 @@ def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-3):  # Increa
         }
     
     try:
-        # Verify shapes match
-        if outputs1['logits'].shape != outputs2['logits'].shape:
-            return {
-                'match': False,
-                'error': f"Shape mismatch: {name1} logits {outputs1['logits'].shape} vs {name2} logits {outputs2['logits'].shape}"
-            }
+        # Get shapes
+        shapes1 = {k: v.shape for k, v in outputs1.items()}
+        shapes2 = {k: v.shape for k, v in outputs2.items()}
+        
+        print(f"\nShape comparison for {name1} vs {name2}:")
+        for key in shapes1.keys():
+            print(f"  {key}: {shapes1[key]} vs {shapes2.get(key, 'missing')}")
+        
+        # Verify shapes match for each component
+        for key in ['logits', 'probs', 'predictions']:
+            if key not in outputs1 or key not in outputs2:
+                return {
+                    'match': False,
+                    'error': f"Missing {key} in one of the outputs"
+                }
+            if outputs1[key].shape != outputs2[key].shape:
+                return {
+                    'match': False,
+                    'error': f"Shape mismatch for {key}: {outputs1[key].shape} vs {outputs2[key].shape}"
+                }
         
         results = {}
         
         # Compare logits
         logits_diff = torch.abs(outputs1['logits'] - outputs2['logits'])
-        max_logits_diff = logits_diff.max().item()
-        mean_logits_diff = logits_diff.mean().item()
-        std_logits_diff = logits_diff.std().item()
+        results['max_logits_diff'] = logits_diff.max().item()
+        results['mean_logits_diff'] = logits_diff.mean().item()
+        results['std_logits_diff'] = logits_diff.std().item()
         
         # Compare probabilities
         probs_diff = torch.abs(outputs1['probs'] - outputs2['probs'])
-        max_probs_diff = probs_diff.max().item()
-        mean_probs_diff = probs_diff.mean().item()
-        std_probs_diff = probs_diff.std().item()
+        results['max_probs_diff'] = probs_diff.max().item()
+        results['mean_probs_diff'] = probs_diff.mean().item()
+        results['std_probs_diff'] = probs_diff.std().item()
         
-        # Compare top-k predictions (more lenient than exact matches)
+        # Compare top-k predictions
         k = 5
         top_k1 = torch.topk(outputs1['probs'], k, dim=-1).indices
         top_k2 = torch.topk(outputs2['probs'], k, dim=-1).indices
-        top_k_overlap = torch.zeros_like(top_k1, dtype=torch.float32)
+        
+        # Compute overlap for each position
+        top_k_overlap = torch.zeros_like(top_k1[:, :, 0], dtype=torch.float32)
         for i in range(k):
-            top_k_overlap += torch.any(top_k1 == top_k2[:, :, i:i+1], dim=-1).float()
-        top_k_match_rate = (top_k_overlap > 0).float().mean().item()
+            for j in range(k):
+                top_k_overlap += (top_k1[:, :, i] == top_k2[:, :, j]).float()
+        
+        results['top_k_match_rate'] = (top_k_overlap > 0).float().mean().item()
         
         # Exact prediction match rate
-        pred_match = (outputs1['predictions'] == outputs2['predictions']).float().mean().item()
+        pred_match = (outputs1['predictions'] == outputs2['predictions']).float()
+        results['prediction_match_rate'] = pred_match.mean().item()
         
-        results = {
-            'match': max_logits_diff < tolerance and max_probs_diff < tolerance,
-            'max_logits_diff': max_logits_diff,
-            'mean_logits_diff': mean_logits_diff,
-            'std_logits_diff': std_logits_diff,
-            'max_probs_diff': max_probs_diff,
-            'mean_probs_diff': mean_probs_diff,
-            'std_probs_diff': std_probs_diff,
-            'top_k_match_rate': top_k_match_rate,
-            'prediction_match_rate': pred_match
-        }
+        # Overall match criteria
+        results['match'] = (
+            results['max_logits_diff'] < tolerance and
+            results['max_probs_diff'] < tolerance and
+            results['prediction_match_rate'] > 0.9  # Allow for some minor differences
+        )
         
-        # Print comparison results
-        print(f"\nComparing {name1} vs {name2}:")
-        print(f"Shapes: {name1}={outputs1['logits'].shape}, {name2}={outputs2['logits'].shape}")
-        print(f"Maximum logits difference: {max_logits_diff:.6f}")
-        print(f"Mean logits difference: {mean_logits_diff:.6f} (std: {std_logits_diff:.6f})")
-        print(f"Maximum probability difference: {max_probs_diff:.6f}")
-        print(f"Mean probability difference: {mean_probs_diff:.6f} (std: {std_probs_diff:.6f})")
-        print(f"Top-{k} prediction overlap rate: {top_k_match_rate*100:.2f}%")
-        print(f"Exact prediction match rate: {pred_match*100:.2f}%")
-        print(f"Overall match: {'Yes' if results['match'] else 'No'}")
+        # Print detailed comparison results
+        print(f"\nDetailed comparison of {name1} vs {name2}:")
+        print(f"Logits differences:")
+        print(f"  Max: {results['max_logits_diff']:.6f}")
+        print(f"  Mean: {results['mean_logits_diff']:.6f}")
+        print(f"  Std: {results['std_logits_diff']:.6f}")
+        
+        print(f"\nProbability differences:")
+        print(f"  Max: {results['max_probs_diff']:.6f}")
+        print(f"  Mean: {results['mean_probs_diff']:.6f}")
+        print(f"  Std: {results['std_probs_diff']:.6f}")
+        
+        print(f"\nPrediction metrics:")
+        print(f"  Top-{k} overlap rate: {results['top_k_match_rate']*100:.2f}%")
+        print(f"  Exact match rate: {results['prediction_match_rate']*100:.2f}%")
+        print(f"  Overall match: {'Yes' if results['match'] else 'No'}")
         
         return results
+        
     except Exception as e:
+        import traceback
+        print(f"Error during comparison:")
+        print(traceback.format_exc())
         return {
             'match': False,
             'error': f"Comparison error: {str(e)}"
