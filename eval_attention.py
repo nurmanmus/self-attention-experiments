@@ -343,6 +343,99 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
     
     return metrics
 
+def compute_model_outputs(model, input_ids, device):
+    """Compute model outputs with proper error handling and device management."""
+    model.eval()
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
+        try:
+            outputs = model(input_ids.to(device))
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+            else:
+                logits = outputs
+            # Get predictions
+            probs = torch.softmax(logits, dim=-1)
+            predictions = torch.argmax(probs, dim=-1)
+            return {
+                'logits': logits.cpu(),
+                'probs': probs.cpu(),
+                'predictions': predictions.cpu()
+            }
+        except Exception as e:
+            print(f"Error computing outputs: {str(e)}")
+            return None
+
+def compare_outputs(outputs1, outputs2, name1, name2, tolerance=1e-4):
+    """Compare outputs between two models and return detailed metrics."""
+    if outputs1 is None or outputs2 is None:
+        return {
+            'match': False,
+            'error': 'One or both outputs are None'
+        }
+    
+    results = {}
+    
+    # Compare logits
+    logits_diff = torch.abs(outputs1['logits'] - outputs2['logits'])
+    max_logits_diff = logits_diff.max().item()
+    mean_logits_diff = logits_diff.mean().item()
+    
+    # Compare probabilities
+    probs_diff = torch.abs(outputs1['probs'] - outputs2['probs'])
+    max_probs_diff = probs_diff.max().item()
+    mean_probs_diff = probs_diff.mean().item()
+    
+    # Compare predictions
+    pred_match = (outputs1['predictions'] == outputs2['predictions']).float().mean().item()
+    
+    results = {
+        'match': max_logits_diff < tolerance and max_probs_diff < tolerance,
+        'max_logits_diff': max_logits_diff,
+        'mean_logits_diff': mean_logits_diff,
+        'max_probs_diff': max_probs_diff,
+        'mean_probs_diff': mean_probs_diff,
+        'prediction_match_rate': pred_match
+    }
+    
+    # Print comparison results
+    print(f"\nComparing {name1} vs {name2}:")
+    print(f"Maximum logits difference: {max_logits_diff:.6f}")
+    print(f"Mean logits difference: {mean_logits_diff:.6f}")
+    print(f"Maximum probability difference: {max_probs_diff:.6f}")
+    print(f"Mean probability difference: {mean_probs_diff:.6f}")
+    print(f"Prediction match rate: {pred_match*100:.2f}%")
+    print(f"Overall match: {'Yes' if results['match'] else 'No'}")
+    
+    return results
+
+def validate_attention_mechanisms(models, test_inputs, device, tolerance=1e-4):
+    """Validate that different attention mechanisms produce consistent outputs."""
+    print("\nValidating attention mechanism outputs...")
+    
+    outputs = {}
+    comparisons = {}
+    
+    # Compute outputs for each model
+    for name, model in models.items():
+        outputs[name] = compute_model_outputs(model, test_inputs, device)
+    
+    # Compare outputs between all pairs of models
+    model_names = list(models.keys())
+    for i in range(len(model_names)):
+        for j in range(i + 1, len(model_names)):
+            name1, name2 = model_names[i], model_names[j]
+            comparison_key = f"{name1}_vs_{name2}"
+            comparisons[comparison_key] = compare_outputs(
+                outputs[name1], outputs[name2], name1, name2, tolerance
+            )
+    
+    # Overall validation result
+    all_match = all(comp['match'] for comp in comparisons.values())
+    print("\nOverall Validation Result:")
+    print(f"All mechanisms produce consistent outputs: {'Yes' if all_match else 'No'}")
+    
+    return comparisons
+
 def evaluate_attention_mechanisms(num_samples=32):
     """Evaluate different attention mechanisms."""
     print("Using device:", device)
@@ -352,8 +445,30 @@ def evaluate_attention_mechanisms(num_samples=32):
     results = {
         'memory_usage': {},
         'inference_speed': {},
-        'kqv_cache_metrics': {}
+        'kqv_cache_metrics': {},
+        'validation_results': {}
     }
+    
+    # Initialize models for all attention mechanisms
+    models = {
+        'mha': initialize_model('mha'),
+        'mqa': initialize_model('mqa'),
+        'mla': initialize_model('mla')
+    }
+    
+    # Move models to device
+    for model in models.values():
+        model.to(device)
+        model.eval()
+    
+    # Generate test data for validation
+    print("\nPreparing validation data...")
+    validation_inputs, _ = load_test_data(tokenizer, sequence_length=512, num_samples=4)
+    
+    # Perform validation
+    results['validation_results'] = validate_attention_mechanisms(
+        models, validation_inputs, device, tolerance=1e-4
+    )
     
     # Adjusted test parameters for A100
     sequence_lengths = [512, 1024, 2048]
@@ -397,20 +512,13 @@ def evaluate_attention_mechanisms(num_samples=32):
         print(f"\nEvaluating {attn_type.upper()}...")
         
         try:
-            # Initialize model
-            model = initialize_model(attn_type)
-            if not model:
-                print(f"No weights found for {attn_type.upper()}, using random initialization")
-            model = model.to(device)
-            model.eval()
-            
             # Memory usage
             print("Measuring memory usage...")
             memory_results = {}
             for seq_len in sequence_lengths:
                 for batch_size in batch_sizes:
                     try:
-                        memory_used = measure_memory_usage(model, device, tokenizer, 
+                        memory_used = measure_memory_usage(models[attn_type], device, tokenizer, 
                                                         input_size=(batch_size, seq_len))
                         memory_results[f'b{batch_size}_s{seq_len}'] = memory_used
                         clear_gpu_memory()
@@ -426,7 +534,7 @@ def evaluate_attention_mechanisms(num_samples=32):
                 for batch_size in batch_sizes:
                     if memory_results[f'b{batch_size}_s{seq_len}'] != float('inf'):
                         try:
-                            avg_time = measure_inference_speed(model, device, tokenizer,
+                            avg_time = measure_inference_speed(models[attn_type], device, tokenizer,
                                                             input_size=(batch_size, seq_len),
                                                             num_runs=10)
                             speed_results[f'b{batch_size}_s{seq_len}'] = avg_time
@@ -445,7 +553,7 @@ def evaluate_attention_mechanisms(num_samples=32):
                 for batch_size in batch_sizes:
                     if memory_results[f'b{batch_size}_s{seq_len}'] != float('inf'):
                         try:
-                            metrics = measure_kqv_cache_performance(model, device, tokenizer,
+                            metrics = measure_kqv_cache_performance(models[attn_type], device, tokenizer,
                                                                  input_size=(batch_size, seq_len))
                             kqv_metrics[f'b{batch_size}_s{seq_len}'] = metrics
                             clear_gpu_memory()
