@@ -15,6 +15,7 @@ from collections import Counter
 import itertools
 import random
 from typing import Tuple, List, Dict
+import math
 
 # Set up device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,8 +31,7 @@ def initialize_model(attn_type):
         vocab_size=50257,  # GPT-2 vocab size
         max_seq_len=1024,
         use_mla=attn_type == 'mla',
-        use_mqa=attn_type == 'mqa',
-        return_attention=True  # Explicitly request attention weights
+        use_mqa=attn_type == 'mqa'
     )
     
     # Try to load pre-trained weights if available
@@ -179,35 +179,46 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
         batch_size = x.size(0)
         x = x.view(batch_size, -1)
     
+    # Create a hook to capture attention weights
+    attention_weights = []
+    
+    def attention_hook(module, inputs, outputs):
+        # For scaled_dot_product_attention, the attention weights are in the second output
+        if isinstance(outputs, tuple) and len(outputs) > 1:
+            weights = outputs[1]
+        else:
+            # If no attention weights in output, compute them manually
+            q, k, v, mask = inputs
+            # Scale dot product
+            d_k = q.size(-1)
+            scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+            # Apply mask
+            if mask is not None:
+                scores = scores.masked_fill(~mask, float('-inf'))
+            # Get attention weights
+            weights = torch.softmax(scores, dim=-1)
+        attention_weights.append(weights.detach())
+    
+    # Register hooks for each attention layer
+    hooks = []
+    for name, module in model.named_modules():
+        if 'mha' in name.lower():  # This will catch MHA, MQA, and MLA attention modules
+            hook = module.register_forward_hook(attention_hook)
+            hooks.append(hook)
+    
     with torch.no_grad():
-        # Get model outputs with attention weights
+        # Forward pass to get attention weights
         outputs = model(x)
         
-        # Extract attention weights based on model output format
-        if isinstance(outputs, dict) and 'attention_weights' in outputs:
-            # If model returns a dictionary with attention weights
-            attention_weights = outputs['attention_weights']
-        elif isinstance(outputs, tuple) and len(outputs) > 1:
-            # If model returns (logits, attention_weights) or (logits, kv_cache)
-            if isinstance(outputs[1], list) and all(isinstance(layer, torch.Tensor) for layer in outputs[1]):
-                attention_weights = outputs[1]
-            elif isinstance(outputs[1], tuple) and len(outputs[1]) > 0:
-                # Try to extract attention from kv_cache
-                attention_weights = []
-                for layer_cache in outputs[1]:
-                    if isinstance(layer_cache, tuple) and len(layer_cache) > 2:
-                        attention_weights.append(layer_cache[2])
-        else:
-            print("Warning: Could not extract attention weights from model outputs")
-            print(f"Model output type: {type(outputs)}")
-            if isinstance(outputs, tuple):
-                print(f"Output tuple length: {len(outputs)}")
-                for i, item in enumerate(outputs):
-                    print(f"Output[{i}] type: {type(item)}")
-            return None
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
         
         if not attention_weights:
-            print("Warning: No attention weights found in model outputs")
+            print("Warning: No attention weights captured during forward pass")
+            print("Model architecture:")
+            for name, module in model.named_modules():
+                print(f"- {name}: {type(module)}")
             return None
             
         # Verify attention weights format
