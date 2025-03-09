@@ -35,7 +35,7 @@ def initialize_model(attn_type):
     
     # Try to load pre-trained weights if available
     try:
-        model.load_state_dict(torch.load(f'weights/{attn_type}_model.pt'))
+        model.load_state_dict(torch.load(f'weights/{attn_type}_model.pt', weights_only=True))
         return model
     except:
         return model
@@ -45,48 +45,29 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
     # Create figures directory if it doesn't exist
     os.makedirs("figures", exist_ok=True)
     
-    # Load datasets with increased timeout and retries
+    # Load datasets
     try:
-        # Configure dataset loading with longer timeout
-        from datasets.config import HF_DATASETS_CACHE
-        from datasets.utils.download_manager import DownloadConfig
-        download_config = DownloadConfig(max_retries=5, num_proc=4, force_download=False)
-        
-        # Load datasets with increased timeout
+        # Load WikiText dataset
         wikitext = load_dataset("wikitext", 
                               "wikitext-103-v1", 
                               split="test",
-                              download_config=download_config)
+                              trust_remote_code=True)
         
-        c4 = load_dataset("allenai/c4", 
-                         "en", 
-                         split="train", 
-                         streaming=True,
-                         download_config=download_config)
+        # Get samples from dataset
+        text_samples = []
+        for text in wikitext["text"]:
+            if text and isinstance(text, str) and len(text.strip()) > 0:
+                text_samples.append(("wiki", text.strip()))
+                if len(text_samples) >= num_samples:
+                    break
         
-        bookcorpus = load_dataset("bookcorpus", 
-                                 split="train", 
-                                 streaming=True,
-                                 download_config=download_config,
-                                 trust_remote_code=True)
-        
-        # Get samples from each dataset
-        wiki_samples = wikitext["text"][:num_samples]
-        c4_samples = list(itertools.islice(c4, num_samples))
-        book_samples = list(itertools.islice(bookcorpus, num_samples))
-        
-        # Combine samples from different sources
-        combined_samples = []
-        for source, samples in [("wiki", wiki_samples), 
-                              ("c4", [s["text"] for s in c4_samples]), 
-                              ("book", [s["text"] for s in book_samples])]:
-            for text in samples:
-                if text and isinstance(text, str) and len(text.strip()) > 0:
-                    combined_samples.append((source, text.strip()))
+        # If we don't have enough samples, add some random text
+        while len(text_samples) < num_samples:
+            text_samples.append(("random", "Random generated text for testing attention patterns."))
         
         # Shuffle and select required number of samples
-        random.shuffle(combined_samples)
-        selected_samples = combined_samples[:num_samples]
+        random.shuffle(text_samples)
+        selected_samples = text_samples[:num_samples]
         
         # Tokenize and prepare tensors
         tokenized_texts = []
@@ -107,14 +88,14 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
         if tokenized_texts:
             input_tensor = torch.cat(tokenized_texts, dim=0)
         else:
-            print("Warning: No valid samples found in the datasets, using random data")
+            print("Warning: No valid samples found in the dataset, using random data")
             input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
             return input_tensor, [("random", "Random text") for _ in range(num_samples)]
             
         return input_tensor, source_texts
         
     except Exception as e:
-        print(f"Error loading datasets: {str(e)}")
+        print(f"Error loading dataset: {str(e)}")
         print("Falling back to random data generation")
         # Fallback to simple random data if dataset loading fails
         input_tensor = torch.randint(0, tokenizer.vocab_size, (num_samples, sequence_length))
@@ -162,9 +143,14 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     x = x.to(device)
     
     with torch.no_grad():
-        # Get attention weights
-        outputs = model(x, output_attentions=True)
-        attention_weights = outputs[-1]  # Tuple of attention weights for each layer
+        # Get attention weights from the model's forward pass
+        outputs = model(x)
+        # Assuming the model returns attention weights as part of its output
+        if isinstance(outputs, tuple) and len(outputs) > 1:
+            attention_weights = outputs[1]  # Second element should be attention weights
+        else:
+            print("Warning: Model did not return attention weights, skipping attention analysis")
+            return None
     
     # Create directory for figures if it doesn't exist
     os.makedirs("figures", exist_ok=True)
