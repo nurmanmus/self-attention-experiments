@@ -16,9 +16,15 @@ import itertools
 import random
 from typing import Tuple, List, Dict
 import math
+import gc
 
-# Set up device
+# Set up device and memory management
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    # Set memory allocation settings
+    torch.cuda.set_per_process_memory_fraction(0.8)  # Use 80% of available memory
+    torch.backends.cudnn.benchmark = True
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
 
 def initialize_model(attn_type):
     """Initialize model with specified attention type."""
@@ -34,12 +40,21 @@ def initialize_model(attn_type):
         use_mqa=attn_type == 'mqa'
     )
     
+    # Enable gradient checkpointing for memory efficiency
+    model.gradient_checkpointing_enable()
+    
     # Try to load pre-trained weights if available
     try:
         model.load_state_dict(torch.load(f'weights/{attn_type}_model.pt', weights_only=True))
         return model
     except:
         return model
+
+def clear_gpu_memory():
+    """Clear GPU memory cache."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
 
 def load_test_data(tokenizer, sequence_length: int = 2048, num_samples: int = 1) -> Tuple[torch.Tensor, List[str]]:
     """Load and prepare test data from multiple sources."""
@@ -128,60 +143,76 @@ def load_test_data(tokenizer, sequence_length: int = 2048, num_samples: int = 1)
 
 def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
     """Measure memory usage of the model."""
-    torch.cuda.empty_cache()
+    clear_gpu_memory()
     initial_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
     
-    x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
-    x = x.to(device)
-    
-    # Ensure input is 2D (batch_size, sequence_length)
-    if len(x.shape) > 2:
-        batch_size = x.size(0)
-        x = x.view(batch_size, -1)
-    
-    with torch.no_grad():
-        outputs = model(x)
-        if isinstance(outputs, tuple):
-            logits = outputs[0]
-        else:
-            logits = outputs
-    
-    final_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
-    memory_used = (final_memory - initial_memory) / 1024 / 1024  # Convert to MB
-    return memory_used
+    try:
+        with torch.cuda.amp.autocast():  # Use mixed precision
+            x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
+            x = x.to(device)
+            
+            if len(x.shape) > 2:
+                batch_size = x.size(0)
+                x = x.view(batch_size, -1)
+            
+            with torch.no_grad():
+                outputs = model(x)
+                if isinstance(outputs, tuple):
+                    logits = outputs[0]
+                else:
+                    logits = outputs
+        
+        final_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+        memory_used = (final_memory - initial_memory) / 1024 / 1024  # Convert to MB
+        clear_gpu_memory()
+        return memory_used
+    except RuntimeError as e:
+        print(f"Memory measurement failed: {str(e)}")
+        clear_gpu_memory()
+        return float('inf')
 
 def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_runs=100):
     """Measure inference speed of the model."""
-    x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
-    x = x.to(device)
+    clear_gpu_memory()
     
-    # Ensure input is 2D (batch_size, sequence_length)
-    if len(x.shape) > 2:
-        batch_size = x.size(0)
-        x = x.view(batch_size, -1)
-    
-    # Warmup
-    with torch.no_grad():
-        for _ in range(10):
-            outputs = model(x)
-            if isinstance(outputs, tuple):
-                logits = outputs[0]
-            else:
-                logits = outputs
-    
-    # Measure time
-    start_time = time.time()
-    with torch.no_grad():
-        for _ in range(num_runs):
-            outputs = model(x)
-            if isinstance(outputs, tuple):
-                logits = outputs[0]
-            else:
-                logits = outputs
-    end_time = time.time()
-    
-    avg_time = (end_time - start_time) / num_runs
-    return avg_time
+    try:
+        with torch.cuda.amp.autocast():  # Use mixed precision
+            x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
+            x = x.to(device)
+            
+            if len(x.shape) > 2:
+                batch_size = x.size(0)
+                x = x.view(batch_size, -1)
+            
+            # Warmup with fewer runs
+            with torch.no_grad():
+                for _ in range(5):
+                    outputs = model(x)
+                    if isinstance(outputs, tuple):
+                        logits = outputs[0]
+                    else:
+                        logits = outputs
+            
+            clear_gpu_memory()
+            
+            # Measure time
+            start_time = time.time()
+            with torch.no_grad():
+                for _ in range(num_runs):
+                    outputs = model(x)
+                    if isinstance(outputs, tuple):
+                        logits = outputs[0]
+                    else:
+                        logits = outputs
+            end_time = time.time()
+        
+        avg_time = (end_time - start_time) / num_runs
+        clear_gpu_memory()
+        return avg_time
+    except RuntimeError as e:
+        print(f"Speed measurement failed: {str(e)}")
+        clear_gpu_memory()
+        return float('inf')
 
 def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512), num_runs=10):
     """Measure performance metrics for KQV cache computation."""
@@ -285,9 +316,10 @@ def measure_kqv_cache_performance(model, device, tokenizer, input_size=(1, 512),
     
     return metrics
 
-def evaluate_attention_mechanisms(num_samples=32):  # Increased default samples
+def evaluate_attention_mechanisms(num_samples=32):
     """Evaluate different attention mechanisms."""
     print("Using device:", device)
+    print(f"GPU Memory Available: {torch.cuda.get_device_properties(0).total_memory/1024/1024/1024:.2f} GB")
     
     # Initialize results dictionary
     results = {
@@ -296,9 +328,9 @@ def evaluate_attention_mechanisms(num_samples=32):  # Increased default samples
         'kqv_cache_metrics': {}
     }
     
-    # More realistic test parameters
-    sequence_lengths = [512, 1024, 2048]  # Common sequence lengths
-    batch_sizes = [1, 8, 32]  # Various batch sizes for throughput testing
+    # Adjusted test parameters for A100
+    sequence_lengths = [512, 1024, 2048]
+    batch_sizes = [1, 4, 16]  # Reduced batch sizes
     
     def display_metrics(attn_type, memory_results, speed_results, kqv_metrics):
         """Display performance metrics for the current attention mechanism."""
@@ -337,102 +369,102 @@ def evaluate_attention_mechanisms(num_samples=32):  # Increased default samples
     for attn_type in ['mha', 'mqa', 'mla']:
         print(f"\nEvaluating {attn_type.upper()}...")
         
-        # Initialize model
-        model = initialize_model(attn_type)
-        if not model:
-            print(f"No weights found for {attn_type.upper()}, using random initialization")
-        model = model.to(device)
-        model.eval()
-        
-        # Memory usage
-        print("Measuring memory usage...")
-        memory_results = {}
-        for seq_len in sequence_lengths:
-            for batch_size in batch_sizes:
-                memory_used = measure_memory_usage(model, device, tokenizer, 
-                                                input_size=(batch_size, seq_len))
-                memory_results[f'b{batch_size}_s{seq_len}'] = memory_used
-        results['memory_usage'][attn_type] = memory_results
-        
-        # Inference speed
-        print("Measuring inference speed...")
-        speed_results = {}
-        for seq_len in sequence_lengths:
-            for batch_size in batch_sizes:
-                avg_time = measure_inference_speed(model, device, tokenizer,
-                                                input_size=(batch_size, seq_len),
-                                                num_runs=10)
-                speed_results[f'b{batch_size}_s{seq_len}'] = avg_time
-        results['inference_speed'][attn_type] = speed_results
-        
-        # KQV cache performance
-        print("Measuring KQV cache performance...")
-        kqv_metrics = {}
-        for seq_len in sequence_lengths:
-            for batch_size in batch_sizes:
-                metrics = measure_kqv_cache_performance(model, device, tokenizer,
-                                                     input_size=(batch_size, seq_len))
-                kqv_metrics[f'b{batch_size}_s{seq_len}'] = metrics
-        results['kqv_cache_metrics'][attn_type] = kqv_metrics
-        
-        # Display current metrics
-        display_metrics(attn_type, memory_results, speed_results, kqv_metrics)
-        
-        # Clear GPU memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    
-    # Display final comparative metrics
-    print("\nComparative Performance Summary:")
-    print("=" * 60)
-    
-    print("\nMemory Usage Comparison (MB):")
-    print("-" * 70)
-    print(f"{'Config':<20} {'MHA':>15} {'MQA':>15} {'MLA':>15}")
-    print("-" * 70)
-    for config in results['memory_usage']['mha'].keys():
-        print(f"{config:<20}", end="")
-        for attn_type in ['mha', 'mqa', 'mla']:
-            print(f"{results['memory_usage'][attn_type][config]:>15.2f}", end="")
-        print()
-    
-    print("\nInference Speed Comparison (seconds):")
-    print("-" * 70)
-    print(f"{'Config':<20} {'MHA':>15} {'MQA':>15} {'MLA':>15}")
-    print("-" * 70)
-    for config in results['inference_speed']['mha'].keys():
-        print(f"{config:<20}", end="")
-        for attn_type in ['mha', 'mqa', 'mla']:
-            print(f"{results['inference_speed'][attn_type][config]:>15.5f}", end="")
-        print()
-    
-    print("\nKQV Cache Performance Comparison:")
-    print("-" * 70)
-    print("Average per layer:")
-    metrics = ['memory', 'time', 'cache_size']
-    for metric in metrics:
-        print(f"\n{metric.title()} Usage:")
-        print(f"{'Config':<20} {'MHA':>15} {'MQA':>15} {'MLA':>15}")
-        print("-" * 70)
-        for config in results['kqv_cache_metrics']['mha'].keys():
-            print(f"{config:<20}", end="")
-            for attn_type in ['mha', 'mqa', 'mla']:
-                value = results['kqv_cache_metrics'][attn_type][config][metric]
-                print(f"{value:>15.2f}", end="")
-            print()
+        try:
+            # Initialize model
+            model = initialize_model(attn_type)
+            if not model:
+                print(f"No weights found for {attn_type.upper()}, using random initialization")
+            model = model.to(device)
+            model.eval()
+            
+            # Memory usage
+            print("Measuring memory usage...")
+            memory_results = {}
+            for seq_len in sequence_lengths:
+                for batch_size in batch_sizes:
+                    try:
+                        memory_used = measure_memory_usage(model, device, tokenizer, 
+                                                        input_size=(batch_size, seq_len))
+                        memory_results[f'b{batch_size}_s{seq_len}'] = memory_used
+                        clear_gpu_memory()
+                    except RuntimeError as e:
+                        print(f"Skipping config b{batch_size}_s{seq_len} due to memory constraints")
+                        memory_results[f'b{batch_size}_s{seq_len}'] = float('inf')
+            results['memory_usage'][attn_type] = memory_results
+            
+            # Inference speed
+            print("Measuring inference speed...")
+            speed_results = {}
+            for seq_len in sequence_lengths:
+                for batch_size in batch_sizes:
+                    if memory_results[f'b{batch_size}_s{seq_len}'] != float('inf'):
+                        try:
+                            avg_time = measure_inference_speed(model, device, tokenizer,
+                                                            input_size=(batch_size, seq_len),
+                                                            num_runs=10)
+                            speed_results[f'b{batch_size}_s{seq_len}'] = avg_time
+                            clear_gpu_memory()
+                        except RuntimeError as e:
+                            print(f"Skipping speed measurement for b{batch_size}_s{seq_len}")
+                            speed_results[f'b{batch_size}_s{seq_len}'] = float('inf')
+                    else:
+                        speed_results[f'b{batch_size}_s{seq_len}'] = float('inf')
+            results['inference_speed'][attn_type] = speed_results
+            
+            # KQV cache performance
+            print("Measuring KQV cache performance...")
+            kqv_metrics = {}
+            for seq_len in sequence_lengths:
+                for batch_size in batch_sizes:
+                    if memory_results[f'b{batch_size}_s{seq_len}'] != float('inf'):
+                        try:
+                            metrics = measure_kqv_cache_performance(model, device, tokenizer,
+                                                                 input_size=(batch_size, seq_len))
+                            kqv_metrics[f'b{batch_size}_s{seq_len}'] = metrics
+                            clear_gpu_memory()
+                        except RuntimeError as e:
+                            print(f"Skipping KQV measurement for b{batch_size}_s{seq_len}")
+                            kqv_metrics[f'b{batch_size}_s{seq_len}'] = {
+                                'memory': float('inf'),
+                                'time': float('inf'),
+                                'cache_size': float('inf')
+                            }
+                    else:
+                        kqv_metrics[f'b{batch_size}_s{seq_len}'] = {
+                            'memory': float('inf'),
+                            'time': float('inf'),
+                            'cache_size': float('inf')
+                        }
+            results['kqv_cache_metrics'][attn_type] = kqv_metrics
+            
+            # Display current metrics
+            display_metrics(attn_type, memory_results, speed_results, kqv_metrics)
+            
+        except Exception as e:
+            print(f"Error evaluating {attn_type}: {str(e)}")
+        finally:
+            # Clear GPU memory
+            clear_gpu_memory()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     return results
 
 if __name__ == "__main__":
     print("Using device:", device)
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"Total GPU Memory: {torch.cuda.get_device_properties(0).total_memory/1024/1024/1024:.2f} GB")
     print("Loading tokenizer...")
     
     # Initialize tokenizer with padding
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token  # Use EOS token as padding token
+    tokenizer.pad_token = tokenizer.eos_token
     
     # Run evaluation
     try:
         results = evaluate_attention_mechanisms(num_samples=32)
     except Exception as e:
-        print(f"Error during evaluation: {str(e)}") 
+        print(f"Error during evaluation: {str(e)}")
+    finally:
+        clear_gpu_memory() 
