@@ -17,6 +17,7 @@ import random
 from typing import Tuple, List, Dict
 import math
 import gc
+import torch.utils.checkpoint as checkpoint
 
 # Set up device and memory management
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,6 +26,18 @@ if torch.cuda.is_available():
     torch.cuda.set_per_process_memory_fraction(0.8)  # Use 80% of available memory
     torch.backends.cudnn.benchmark = True
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
+
+def enable_gradient_checkpointing(model):
+    """Enable gradient checkpointing for supported modules."""
+    def _enable_checkpointing(module):
+        if hasattr(module, 'forward') and len(list(module.children())) > 0:
+            # Only apply to modules with children (like transformer layers)
+            module._forward = checkpoint.checkpoint(module.forward)
+    
+    # Apply recursively to all eligible modules
+    for module in model.modules():
+        _enable_checkpointing(module)
+    return model
 
 def initialize_model(attn_type):
     """Initialize model with specified attention type."""
@@ -40,8 +53,8 @@ def initialize_model(attn_type):
         use_mqa=attn_type == 'mqa'
     )
     
-    # Enable gradient checkpointing for memory efficiency
-    model.gradient_checkpointing_enable()
+    # Enable memory efficient features
+    model = enable_gradient_checkpointing(model)
     
     # Try to load pre-trained weights if available
     try:
@@ -147,7 +160,7 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
     initial_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
     
     try:
-        with torch.cuda.amp.autocast():  # Use mixed precision
+        with torch.cuda.amp.autocast(enabled=True):  # Use mixed precision
             x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
             x = x.to(device)
             
@@ -155,12 +168,13 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
                 batch_size = x.size(0)
                 x = x.view(batch_size, -1)
             
-            with torch.no_grad():
+            with torch.no_grad(), torch.backends.cudnn.flags(enabled=True, benchmark=True):
                 outputs = model(x)
                 if isinstance(outputs, tuple):
                     logits = outputs[0]
                 else:
                     logits = outputs
+                torch.cuda.synchronize()  # Ensure all operations are completed
         
         final_memory = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
         memory_used = (final_memory - initial_memory) / 1024 / 1024  # Convert to MB
@@ -176,7 +190,7 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_r
     clear_gpu_memory()
     
     try:
-        with torch.cuda.amp.autocast():  # Use mixed precision
+        with torch.cuda.amp.autocast(enabled=True):  # Use mixed precision
             x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
             x = x.to(device)
             
@@ -185,25 +199,27 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_r
                 x = x.view(batch_size, -1)
             
             # Warmup with fewer runs
-            with torch.no_grad():
+            with torch.no_grad(), torch.backends.cudnn.flags(enabled=True, benchmark=True):
                 for _ in range(5):
                     outputs = model(x)
                     if isinstance(outputs, tuple):
                         logits = outputs[0]
                     else:
                         logits = outputs
+                    torch.cuda.synchronize()
             
             clear_gpu_memory()
             
             # Measure time
             start_time = time.time()
-            with torch.no_grad():
+            with torch.no_grad(), torch.backends.cudnn.flags(enabled=True, benchmark=True):
                 for _ in range(num_runs):
                     outputs = model(x)
                     if isinstance(outputs, tuple):
                         logits = outputs[0]
                     else:
                         logits = outputs
+                    torch.cuda.synchronize()
             end_time = time.time()
         
         avg_time = (end_time - start_time) / num_runs
