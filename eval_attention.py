@@ -183,33 +183,56 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     attention_weights = []
     
     def attention_hook(module, inputs, outputs):
-        # For scaled_dot_product_attention, the attention weights are in the second output
-        if isinstance(outputs, tuple) and len(outputs) > 1:
-            weights = outputs[1]
-            attention_weights.append(weights.detach())
-        else:
-            # If no attention weights in output, compute them manually
-            if isinstance(inputs, tuple):
-                q, k, v = inputs[0], inputs[1], inputs[2]
-                mask = inputs[3] if len(inputs) > 3 else None
-            else:
-                print(f"Warning: Unexpected inputs type: {type(inputs)}")
-                return
+        try:
+            # Extract q, k, v from the module's forward pass
+            if hasattr(module, 'qkv'):
+                # For MHA
+                B, S, D = inputs[0].shape
+                QKV = inputs[0] @ module.qkv.T
+                Q, K, V = torch.chunk(QKV, 3, -1)
+                dh = D // module.n_heads
+                q_heads = Q.view(B, S, module.n_heads, dh).transpose(1, 2)
+                k_heads = K.view(B, S, module.n_heads, dh).transpose(1, 2)
                 
-            # Scale dot product
-            d_k = q.size(-1)
-            scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+            elif hasattr(module, 'wq') and hasattr(module, 'wkv'):
+                # For MQA
+                B, S, D = inputs[0].shape
+                Q = inputs[0] @ module.wq.T
+                KV = inputs[0] @ module.wkv
+                K, V = torch.chunk(KV, 2, -1)
+                dh = D // module.n_heads
+                q_heads = Q.view(B, S, module.n_heads, dh).transpose(1, 2)
+                k_heads = K.unsqueeze(2).expand(B, -1, module.n_heads, -1).view(B, -1, module.n_heads, dh).transpose(1, 2)
+                
+            elif hasattr(module, 'W_dq') and hasattr(module, 'W_dkv'):
+                # For MLA
+                B, S, D = inputs[0].shape
+                compressed_q = inputs[0] @ module.W_dq
+                compressed_q = module.q_layernorm(compressed_q)
+                Q = compressed_q @ module.W_uq
+                compressed_kv = inputs[0] @ module.W_dkv
+                compressed_kv = module.kv_layernorm(compressed_kv)
+                KV = compressed_kv @ module.W_ukv
+                K, V = torch.split(KV, module.d_model, dim=-1)
+                q_heads = Q.view(B, -1, module.n_heads, module.dh).transpose(1, 2)
+                k_heads = K.view(B, -1, module.n_heads, module.dh).transpose(1, 2)
             
-            # Apply mask if provided
-            if mask is not None:
-                if isinstance(mask, torch.Tensor):
-                    scores = scores.masked_fill(~mask, float('-inf'))
-                else:
-                    print(f"Warning: Unexpected mask type: {type(mask)}")
+            # Compute attention scores
+            d_k = q_heads.size(-1)
+            scores = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / math.sqrt(d_k)
             
-            # Get attention weights
+            # Get attention weights through softmax
             weights = torch.softmax(scores, dim=-1)
-            attention_weights.append(weights.detach())
+            attention_weights.append(weights.detach().cpu())
+            
+        except Exception as e:
+            print(f"Error in attention hook: {str(e)}")
+            print(f"Module type: {type(module)}")
+            print(f"Input shapes: {[x.shape for x in inputs]}")
+            if isinstance(outputs, tuple):
+                print(f"Output shapes: {[x.shape for x in outputs]}")
+            else:
+                print(f"Output shape: {outputs.shape}")
     
     # Register hooks for each attention layer
     hooks = []
