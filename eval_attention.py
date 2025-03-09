@@ -81,7 +81,12 @@ def load_test_data(tokenizer, sequence_length: int = 1024, num_samples: int = 1)
                              padding="max_length",
                              return_tensors="pt")
             
-            tokenized_texts.append(tokens["input_ids"])
+            # Ensure input_ids is 2D (batch_size, sequence_length)
+            input_ids = tokens["input_ids"].squeeze(0)  # Remove batch dimension if present
+            if len(input_ids.shape) == 1:
+                input_ids = input_ids.unsqueeze(0)  # Add batch dimension if needed
+            
+            tokenized_texts.append(input_ids)
             source_texts.append((source, text[:100] + "..." if len(text) > 100 else text))
         
         # Stack tensors
@@ -109,6 +114,10 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
     x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
     x = x.to(device)
     
+    # Ensure input is 2D (batch_size, sequence_length)
+    if len(x.shape) > 2:
+        x = x.view(x.size(0), -1)
+    
     with torch.no_grad():
         _ = model(x)
     
@@ -120,6 +129,10 @@ def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), num_r
     """Measure inference speed of the model."""
     x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
     x = x.to(device)
+    
+    # Ensure input is 2D (batch_size, sequence_length)
+    if len(x.shape) > 2:
+        x = x.view(x.size(0), -1)
     
     # Warmup
     with torch.no_grad():
@@ -141,6 +154,10 @@ def analyze_attention_patterns(model, device, tokenizer, sequence_length=512, nu
     model.eval()
     x, source_texts = load_test_data(tokenizer, sequence_length=sequence_length, num_samples=num_samples)
     x = x.to(device)
+    
+    # Ensure input is 2D (batch_size, sequence_length)
+    if len(x.shape) > 2:
+        x = x.view(x.size(0), -1)
     
     with torch.no_grad():
         # Get attention weights from the model's forward pass
