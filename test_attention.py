@@ -12,11 +12,34 @@ def get_attention_patterns(model, seq_len=16, d_model=64):
     # Register a hook to capture attention weights
     attention_patterns = []
     def hook_fn(module, input, output):
-        # Get attention weights before softmax
-        # For MHA/MQA/MLA, the module itself is the attention module
-        q = input[0]  # B, H, S, D
-        k = input[1]  # B, H, S, D
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / (d_model ** 0.5)
+        # Get attention weights from the output
+        # The output should be (attn_output, kv_cache)
+        # We need to compute attention weights from the module's Q and K
+        if hasattr(module, 'wq') and hasattr(module, 'wkv'):
+            # MQA case
+            Q = x @ module.wq.T
+            KV = x @ module.wkv
+            K, _ = torch.chunk(KV, 2, -1)
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
+            k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
+        elif hasattr(module, 'W_q') and hasattr(module, 'W_k'):
+            # MHA case
+            Q = x @ module.W_q.T
+            K = x @ module.W_k.T
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
+            k_heads = K.view(K.shape[0], K.shape[1], module.n_heads, -1).transpose(1, 2)
+        elif hasattr(module, 'W_q') and hasattr(module, 'W_dkv'):
+            # MLA case
+            Q = x @ module.W_q.T
+            KV = x @ module.W_dkv
+            K = module.kv_layernorm(KV)
+            q_heads = Q.view(Q.shape[0], Q.shape[1], module.n_heads, -1).transpose(1, 2)
+            k_heads = K.unsqueeze(2).expand(-1, -1, module.n_heads, -1).transpose(1, 2)
+        else:
+            raise ValueError(f"Unknown attention type: {type(module)}")
+        
+        # Compute attention weights
+        attn_weights = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / (module.d_model ** 0.5)
         attention_patterns.append(attn_weights.detach())
     
     # Register hook directly on the model since it is the attention module
