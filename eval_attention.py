@@ -16,21 +16,39 @@ def load_test_data(tokenizer, sequence_length=512, num_samples=100):
     # Load WikiText-2 test set
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     
-    # Concatenate all texts
-    text = " ".join(dataset["text"])
-    
-    # Tokenize the text
-    tokens = tokenizer(text, return_tensors="pt")["input_ids"][0]
-    
-    # Create chunks of sequence_length
+    # Process text in chunks to avoid tokenizer length issues
     chunks = []
-    texts = []  # Store original text for visualization
-    for i in range(0, min(len(tokens) - sequence_length, num_samples * sequence_length), sequence_length):
-        chunk = tokens[i:i + sequence_length]
-        if len(chunk) == sequence_length:
-            chunks.append(chunk)
-            # Decode tokens back to text for visualization
-            texts.append(tokenizer.decode(chunk))
+    texts = []
+    
+    for text_sample in dataset["text"]:
+        if not text_sample.strip():  # Skip empty lines
+            continue
+            
+        # Tokenize each text sample separately
+        tokens = tokenizer(text_sample, 
+                         truncation=True,
+                         max_length=sequence_length,
+                         return_tensors="pt")["input_ids"][0]
+        
+        if len(tokens) == sequence_length:
+            chunks.append(tokens)
+            texts.append(text_sample)
+            
+        if len(chunks) >= num_samples:
+            break
+    
+    # If we don't have enough full-length sequences, pad the last ones
+    while len(chunks) < num_samples:
+        # Take the last chunk and pad it
+        if chunks:
+            last_tokens = chunks[-1]
+            padded = torch.nn.functional.pad(last_tokens, (0, sequence_length - len(last_tokens)))
+            chunks.append(padded)
+            texts.append(texts[-1])
+        else:
+            # If no chunks at all, create a zero tensor
+            chunks.append(torch.zeros(sequence_length, dtype=torch.long))
+            texts.append("")
     
     return torch.stack(chunks[:num_samples]), texts[:num_samples]
 
@@ -40,7 +58,8 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
     torch.cuda.reset_peak_memory_stats()
     
     # Load real text data
-    x = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0]).to(device)
+    x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
+    x = x.to(device)
     
     # Forward pass
     with autocast('cuda'):
@@ -62,7 +81,8 @@ def measure_memory_usage(model, device, tokenizer, input_size=(1, 512)):
 def measure_inference_speed(model, device, tokenizer, input_size=(1, 512), n_runs=100):
     """Measure average inference time"""
     # Load real text data
-    x = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0]).to(device)
+    x, _ = load_test_data(tokenizer, sequence_length=input_size[1], num_samples=input_size[0])
+    x = x.to(device)
     times = []
     
     # Warmup
@@ -139,13 +159,19 @@ def analyze_attention_patterns(model, device, tokenizer, input_size=(1, 512)):
         # Get attention pattern for the most important head
         attn_pattern = last_layer[0, most_important_head].cpu().numpy()
         
-        # Create attention heatmap
-        plt.figure(figsize=(12, 8))
+        # Create attention heatmap with text labels
+        plt.figure(figsize=(15, 10))
         sns.heatmap(attn_pattern, cmap='viridis')
         plt.title(f'Attention Pattern (Layer {len(all_layers_weights)-1}, Head {most_important_head})')
         plt.xlabel('Key Position')
         plt.ylabel('Query Position')
-        plt.savefig('./figures/attention_pattern.png')
+        
+        # Add text sample as subtitle
+        if texts:
+            plt.figtext(0.5, -0.05, f'Sample text:\n{texts[0][:100]}...', 
+                       wrap=True, horizontalalignment='center', fontsize=8)
+        
+        plt.savefig('./figures/attention_pattern.png', bbox_inches='tight')
         plt.close()
         
         # Plot head importance heatmap
