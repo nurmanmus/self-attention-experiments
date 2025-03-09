@@ -18,6 +18,7 @@ from typing import Tuple, List, Dict
 import math
 import gc
 import torch.utils.checkpoint as checkpoint
+import functools
 
 # Set up device and memory management
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,14 +30,24 @@ if torch.cuda.is_available():
 
 def enable_gradient_checkpointing(model):
     """Enable gradient checkpointing for supported modules."""
-    def _enable_checkpointing(module):
-        if hasattr(module, 'forward') and len(list(module.children())) > 0:
-            # Only apply to modules with children (like transformer layers)
-            module._forward = checkpoint.checkpoint(module.forward)
+    def create_custom_forward(module):
+        orig_forward = module.forward
+        
+        @functools.wraps(orig_forward)
+        def custom_forward(*args, **kwargs):
+            return module._forward(*args, **kwargs)
+        
+        def _checkpointed_forward(*args, **kwargs):
+            return checkpoint.checkpoint(custom_forward, *args, use_reentrant=False, **kwargs)
+        
+        module.forward = _checkpointed_forward
     
-    # Apply recursively to all eligible modules
-    for module in model.modules():
-        _enable_checkpointing(module)
+    # Apply checkpointing to transformer layers
+    for module in model.layers:
+        if hasattr(module, 'forward'):
+            module._forward = module.forward
+            create_custom_forward(module)
+    
     return model
 
 def initialize_model(attn_type):
