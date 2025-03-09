@@ -59,6 +59,8 @@ def initialize_model(attn_type):
     # Set random seed for reproducibility
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     # Parse attention type and variant
     use_mla = attn_type.startswith('mla')
@@ -82,7 +84,12 @@ def initialize_model(attn_type):
         'use_mla': use_mla,
         'use_mqa': use_mqa,
         'use_rope': use_rope,
-        'cache_compress': cache_compress
+        'cache_compress': cache_compress,
+        'dropout': 0.0,      # Disable dropout for deterministic behavior
+        'bias': True,        # Enable bias terms for better expressivity
+        'qk_norm': True,     # Enable query-key normalization
+        'qk_scale': None,    # Let the model compute the scale
+        'rotary_dim': 128    # Fixed rotary dimension for all RoPE variants
     }
     
     print(f"\nModel configuration:")
@@ -100,21 +107,25 @@ def initialize_model(attn_type):
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
         
+        # Initialize weights deterministically
+        def init_weights(module):
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                # Use the same initialization for all linear layers
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if hasattr(module, 'bias') and module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+        
+        print("\nInitializing weights...")
+        model.apply(init_weights)
+        print("Weights initialized")
+        
         # Enable memory efficient features
         print("\nEnabling gradient checkpointing...")
         model = enable_gradient_checkpointing(model)
         print("Gradient checkpointing enabled")
-        
-        # Try to load pre-trained weights if available
-        try:
-            print("\nAttempting to load pre-trained weights...")
-            weights_path = f'weights/{attn_type}_model.pt'
-            print(f"Looking for weights at: {weights_path}")
-            model.load_state_dict(torch.load(weights_path, weights_only=True))
-            print(f"Successfully loaded pre-trained weights for {attn_type}")
-        except Exception as e:
-            print(f"No pre-trained weights found for {attn_type}: {str(e)}")
-            print("Using random initialization")
         
         return model
     except Exception as e:
