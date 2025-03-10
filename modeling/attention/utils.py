@@ -20,5 +20,25 @@ def apply_rope(q, k, cos, sin):
     return q, k
 
 def apply_rope_x(x, cos, sin):
-    return (x * cos) + (rotate_half(x) * sin)
+    """Apply rotary position embeddings to input tensor x.
+    
+    Args:
+        x: Input tensor of shape [batch_size, n_heads, seq_len, rope_dim]
+        cos: Cosine part of rotary embeddings [batch_size, n_heads, seq_len, rope_dim]
+        sin: Sine part of rotary embeddings [batch_size, n_heads, seq_len, rope_dim]
+        
+    Returns:
+        Tensor with rotary position embeddings applied
+    """
+    # Split input into even and odd dimensions
+    x_even = x[..., ::2]
+    x_odd = x[..., 1::2]
+    
+    # Apply rotary embeddings
+    x_rotated = torch.cat([
+        x_even * cos - x_odd * sin,
+        x_odd * cos + x_even * sin
+    ], dim=-1)
+    
+    return x_rotated
 
