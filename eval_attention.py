@@ -85,8 +85,11 @@ def initialize_model(attn_type):
         'use_mqa': use_mqa,
         'use_rope': use_rope,
         'cache_compress': cache_compress
-        'latent_dim': 64 if use_mla else None  # Add latent_dim only for MLA
     }
+    
+    # Add latent_dim only for MLA
+    if use_mla:
+        model_config['latent_dim'] = 64
     
     print(f"\nModel configuration:")
     for k, v in model_config.items():
